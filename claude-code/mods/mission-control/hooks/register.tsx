@@ -49,8 +49,8 @@ const DEMO_DETAIL = 'demo'
 const DETAIL_LENGTH = 140
 // A detail up to this long is taken to fit on one line.
 const ONE_LINE = 60
-// The rows the crab's block takes from the tree: a blank line, then three of glyphs.
-const CRAB_FOOT_ROWS = 5
+// The rows the crab's block takes: a blank line, then three of glyphs.
+const CRAB_FOOT_ROWS = 4
 
 // Held by the host, so a hot reload keeps the picture.
 const nodes = atom({ plugin: 'mission-control', key: 'nodes' } as const, [] as MissionNode[])
@@ -746,7 +746,9 @@ export const register: Register = on => {
     const acted = hidden ? undefined : await read($, scene)
     const ticked = hidden ? undefined : await read($, crabTick)
     const crab = acted === undefined || ticked === undefined ? undefined : sceneRows(acted.activity, ticked)
-    const shown = ls.slice(hidden ? -rows + 1 : -Math.max(1, rows - CRAB_FOOT_ROWS))
+    // The tree keeps at least three rows however short the pane; past that
+    // the crab's block gives way to the engine's scroll window.
+    const shown = ls.slice(hidden ? -rows + 1 : -Math.max(3, rows - 1 - CRAB_FOOT_ROWS))
     return (
       <Box flexDirection="column">
         {head}

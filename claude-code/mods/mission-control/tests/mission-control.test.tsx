@@ -230,6 +230,21 @@ describe('mission-control', () => {
     await pane.unmount()
   })
 
+  test('a short pane keeps several tree rows beside the crab', async ($, on) => {
+    engine(on)
+    await $.session.start({ surface: 'terminal', isInteractive: true, cwd: '/repo' } as any)
+    await $.turn.start({ text: 'go', turnId: 't1' } as any)
+    await $.tool.call({ tool: 'Read', file_path: '/repo/src/a.ts', tool_use_id: 'u1' } as any)
+    await $.tool.call({ tool: 'Read', file_path: '/repo/src/b.ts', tool_use_id: 'u2' } as any)
+    await $.tool.call({ tool: 'Bash', command: 'ls', description: 'list files', tool_use_id: 'u3' } as any)
+    const short = await $.ui.mount({ plugin: 'mission-control', surface: 'terminal', ...PANE, props: { ...PANE.props, scroll: { offset: 0, bodyRows: 9 } } } as any)
+    expect(await short.find({ type: 'Text', text: /a\.ts/ })).toBeDefined()
+    expect(await short.find({ type: 'Text', text: /b\.ts/ })).toBeDefined()
+    expect(await short.find({ type: 'Text', text: /list files/ })).toBeDefined()
+    expect(await short.find({ type: 'Text', text: /Claude is reading/ })).toBeDefined() // the crab fits too
+    await short.unmount()
+  })
+
   test('a helper at work says so in the crab\'s line', async ($, on) => {
     engine(on)
     await $.session.start({ surface: 'terminal', isInteractive: true, cwd: '/repo' } as any)
