@@ -42,6 +42,14 @@ export type RadarAgent = {
 
 declare module 'claude-code' {
   interface PluginState {
-    'agent-radar': { agents: RadarAgent[]; selected: string | null; now: number; notice: string | null; crabTick: number }
+    'agent-radar': {
+      agents: RadarAgent[]
+      selected: string | null
+      now: number
+      notice: string | null
+      crabTick: number
+      gridPage: number // the page of the card grid, newest first, the pane's foot kept for the crab
+      agentPage: number // the page of an agent's messages, newest last
+    }
   }
 }

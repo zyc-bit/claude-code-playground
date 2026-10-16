@@ -113,7 +113,7 @@ describe('agent-radar', () => {
     }
     await $.command.run({ command: 'radar', args: '' } as any)
 
-    const ui = await $.ui.mount({ plugin: 'agent-radar', surface: 'terminal', ...PANE } as any)
+    const ui = await $.ui.mount({ plugin: 'agent-radar', surface: 'terminal', ...PANE, props: { ...PANE.props, scroll: { offset: 0, bodyRows: 40 } } } as any) // tall enough for one pageful of messages
     // 100 columns: two cards a row, newest first, each with its latest words
     expect(await ui.find({ key: 'agent-a2' })).toBeDefined()
     expect(await ui.find({ key: 'agent-a1' })).toBeDefined()
@@ -141,19 +141,48 @@ describe('agent-radar', () => {
     await ui.unmount()
   })
 
-  test('past nine agents every card is drawn, for the pane to scroll', async ($, on) => {
+  test('past a pageful of agents the grid turns pages, nothing folded away', async ($, on) => {
     engine(on, {}, undefined, ['a1', 'a2', 'a3', 'a4', 'a5', 'a6', 'a7', 'a8', 'a9', 'a10', 'a11', 'a12'])
     await $.session.start({ surface: 'terminal', isInteractive: true, cwd: '/work' } as any)
     for (let i = 0; i < 12; i++) await $.agent.spawn({ prompt: 'p', description: `unit ${i + 1}` } as any)
     await $.command.run({ command: 'radar', args: '' } as any)
-    const ui = await $.ui.mount({ plugin: 'agent-radar', surface: 'terminal', ...PANE } as any)
-    expect(cardRows(await ui.drawn()).map(r => r.children.length)).toEqual([2, 2, 2, 2, 2, 2]) // all twelve, two a row
-    expect(await ui.find({ type: 'Text', text: /older/ })).toBeUndefined() // nothing folded away
-    expect(await ui.find({ type: 'Text', text: /↑↓ scroll/ })).toBeDefined() // taller than the pane
-    const tenth: any = await ui.find({ key: 'agent-a3' }) // newest first: the tenth card is a3
+    const ui = await $.ui.mount({ plugin: 'agent-radar', surface: 'terminal', ...PANE } as any) // 30 rows: three rows of cards a page
+    expect(cardRows(await ui.drawn()).map(r => r.children.length)).toEqual([2, 2, 2]) // one pageful
+    expect(await ui.find({ key: 'agent-a12' })).toBeDefined() // newest first
+    expect(await ui.find({ key: 'agent-a6' })).toBeUndefined() // on the next page, not folded away
+    expect(await ui.find({ type: 'Text', text: /1\/2/ })).toBeDefined()
+    await ui.press({ key: 'newer' })
+    expect(await ui.find({ key: 'agent-a3' })).toBeDefined()
+    const tenth: any = await ui.find({ key: 'agent-a3' })
     expect(tenth?.props?.hotkey ?? tenth?.hotkey).toBe('0') // the tenth key on the row of digits
-    const last: any = await ui.find({ key: 'agent-a1' }) // the twelfth card, last spawned
+    const last: any = await ui.find({ key: 'agent-a1' })
     expect(last?.props?.hotkey ?? last?.hotkey).toBeUndefined() // no digit left for it: Tab reaches it
+    await ui.press({ key: 'older' })
+    expect(await ui.find({ key: 'agent-a12' })).toBeDefined() // back to the newest page
+    await ui.unmount()
+  })
+
+  test("an agent's messages page through, the buttons staying put", async ($, on) => {
+    const ten = [
+      { role: 'user', text: 'task zero', toolUses: [] },
+      ...Array.from({ length: 8 }, (_, i) => ({ role: 'assistant', text: `note ${i}`, toolUses: [] })),
+      { role: 'assistant', text: 'the last word', toolUses: [] },
+    ]
+    engine(on, {}, undefined, ['a1'], () => ten)
+    await $.session.start({ surface: 'terminal', isInteractive: true, cwd: '/work' } as any)
+    await $.agent.spawn({ prompt: 'p', description: 'unit' } as any)
+    await $.command.run({ command: 'radar', args: '' } as any)
+    const ui = await $.ui.mount({ plugin: 'agent-radar', surface: 'terminal', ...PANE } as any) // 30 rows: six messages a page
+    await ui.press({ key: 'agent-a1' })
+    expect(await ui.find({ type: 'Text', text: 'the last word' })).toBeDefined() // the latest pageful
+    expect(await ui.find({ type: 'Text', text: 'task zero' })).toBeUndefined()
+    expect(await ui.find({ type: 'Text', text: /2\/2/ })).toBeDefined()
+    await ui.press({ key: 'older' })
+    expect(await ui.find({ type: 'Text', text: 'task zero' })).toBeDefined()
+    expect(await ui.find({ type: 'Text', text: 'the last word' })).toBeUndefined()
+    expect(await ui.find({ key: 'back' })).toBeDefined() // the buttons never move
+    await ui.press({ key: 'end' })
+    expect(await ui.find({ type: 'Text', text: 'the last word' })).toBeDefined()
     await ui.unmount()
   })
 

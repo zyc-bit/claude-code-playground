@@ -34,6 +34,11 @@ const selected = atom({ plugin: 'agent-radar', key: 'selected' } as const, null 
 const now = atom({ plugin: 'agent-radar', key: 'now' } as const, 0)
 const notice = atom({ plugin: 'agent-radar', key: 'notice' } as const, null as string | null) // what the last button press came to
 const crabTick = atom({ plugin: 'agent-radar', key: 'crabTick' } as const, 0) // the crab's animation, ticking only while this pane is up
+// The pages: the pane's scroll window is the engine's, and nothing in the tree can be pinned
+// to it, so each page keeps its own head and foot instead — buttons at the top, the crab at
+// the bottom, one pageful of content between, turned with p and n.
+const gridPage = atom({ plugin: 'agent-radar', key: 'gridPage' } as const, 0)
+const agentPage = atom({ plugin: 'agent-radar', key: 'agentPage' } as const, 0)
 
 let bandOrder: Promise<string[]> | undefined // read once per session: restart to apply
 
@@ -145,6 +150,7 @@ export const register: Register = on => {
     const choose = (id: string | null) => async () => {
       await update($, selected, () => id)
       await update($, notice, () => null)
+      await update($, agentPage, () => 0) // each agent's messages start at their latest pageful
     }
     const say = (text: string) => update($, notice, () => text)
     const toMain = inView !== undefined && (
@@ -200,6 +206,15 @@ export const register: Register = on => {
       const all = 'deny' in found ? [] : found
       const messages = all.slice(-MAX_MESSAGES)
       const note = await read($, notice)
+      // The pageful on show, newest whole; page 0 is the latest, and Older walks back through
+      // the rest. The pane's own scroll window never moves, so the buttons stay put and the
+      // crab stays at the foot.
+      const per = Math.max(3, Math.floor((bodyRows - 10) / 3)) // the head and the crab's foot out of the body, three rows a message
+      const pages = Math.max(1, Math.ceil(messages.length / per))
+      const pg = Math.min(Math.max(0, await read($, agentPage)), pages - 1)
+      const to = messages.length - pg * per
+      const from = Math.max(0, to - per)
+      const page = messages.slice(from, to)
       return withCrab(
         <Box flexDirection="column">
           <Text>
@@ -219,16 +234,20 @@ export const register: Register = on => {
                 await say(r.isDelivered ? 'Asked it to stop. It stops once it reads the message.' : `Not sent: ${r.reason}`)
               }} />
             )}
-            <Button key="end" label="Latest" hotkey="e" onPress={() => $.ui.scroll({ in: PANE, to: 'end' })} />
+            {pages > 1 && <Button key="older" label="Older" hotkey="p" onPress={() => update($, agentPage, () => Math.min(pages - 1, pg + 1))} />}
+            {pages > 1 && <Button key="newer" label="Newer" hotkey="n" onPress={() => update($, agentPage, () => Math.max(0, pg - 1))} />}
+            <Button key="end" label="Latest" hotkey="e" onPress={() => update($, agentPage, () => 0)} />
             {toMain}
             <Button key="close" label="Close" hotkey="q" role="dismiss" onPress={() => $.ui.close({ id: PANE })} />
+            {pages > 1 && <Text dimColor>{`  ${pages - pg}/${pages}`}</Text>}
           </Box>
           {note && <Text color="yellow">{note}</Text>}
           <Text dimColor>{'─'.repeat(Math.max(10, width - 2))}</Text>
           {'deny' in found && <Text dimColor>{`No conversation to show: ${found.deny}`}</Text>}
           {!('deny' in found) && all.length === 0 && <Text dimColor>No messages yet.</Text>}
           {all.length > messages.length && <Text dimColor>{`… ${all.length - messages.length} earlier messages not shown`}</Text>}
-          {messages.map((m, i) => {
+          {page.map((m, k) => {
+            const i = from + k
             const text = m.text.trim()
             const uses = m.role === 'assistant' ? m.toolUses : []
             if (!text && uses.length === 0) return null // a row of tool results only
@@ -251,12 +270,16 @@ export const register: Register = on => {
       )
     }
 
-    // The grid: a card per agent, as many a row as fit (up to three), the newest
-    // first. Every card is drawn; past the pane's height the engine's scroll
-    // window carries the rest (the pane's keys scroll it while focused).
+    // The grid: a card per agent, as many a row as fit (up to three), the newest first,
+    // a pageful of rows at a time. The pane's own scroll window never moves, so the
+    // buttons stay at the head and the crab at the foot of every page.
     const running = list.filter(a => a.status === 'running').length
     const cols = Math.max(1, Math.min(3, Math.floor(width / CARD_MIN)))
     const cardWidth = Math.floor((width - (cols - 1)) / cols) // one cell of gap between cards
+    const rows = chunk(list, cols)
+    const per = Math.max(1, Math.floor((bodyRows - 8) / 6)) // the heading, the buttons and the crab's foot out of the body, six rows a row of cards
+    const pages = Math.max(1, Math.ceil(rows.length / per))
+    const pg = Math.min(Math.max(0, await read($, gridPage)), pages - 1)
     const card = (a: RadarAgent, i: number) => (
       <Box flexDirection="column" width={cardWidth} borderStyle="round" borderColor={a.id === inView ? 'cyan' : 'inactive'} paddingX={1}>
         <Button key={`agent-${a.id}`} plain hotkey={i < 9 ? String(i + 1) : i === 9 ? '0' : undefined} dimColor={a.status !== 'running'} label={`${icon(a)} ${a.description}`} onPress={choose(a.id)} />
@@ -267,18 +290,23 @@ export const register: Register = on => {
     )
     return withCrab(
       <Box flexDirection="column">
-        <Text bold>{`${running} running · ${list.length - running} finished${Math.ceil(list.length / cols) * 6 > bodyRows ? ' · ↑↓ scroll' : ''}`}</Text>
-        {list.length === 0 && <Text dimColor>No subagents yet this session.</Text>}
-        {chunk(list, cols).map((row, r) => (
-          <Box flexDirection="row" gap={1}>
-            {row.map((a, c) => card(a, r * cols + c))}
-          </Box>
-        ))}
+        <Text bold>{`${running} running · ${list.length - running} finished`}</Text>
+        {/* The buttons stay above the grid, as the agent page keeps its own, so a long
+            grid does not bury them past the pane's foot. */}
         <Box flexDirection="row" gap={1}>
           <Button key="clear" label="Clear finished" hotkey="c" onPress={() => update($, agents, all => all.filter(x => x.status === 'running'))} />
           {toMain}
           <Button key="close" label="Close" hotkey="q" role="dismiss" onPress={() => $.ui.close({ id: PANE })} />
+          {pages > 1 && <Button key="older" label="Older" hotkey="p" onPress={() => update($, gridPage, () => Math.max(0, pg - 1))} />}
+          {pages > 1 && <Button key="newer" label="Newer" hotkey="n" onPress={() => update($, gridPage, () => Math.min(pages - 1, pg + 1))} />}
+          {pages > 1 && <Text dimColor>{`  ${pg + 1}/${pages}`}</Text>}
         </Box>
+        {list.length === 0 && <Text dimColor>No subagents yet this session.</Text>}
+        {rows.slice(pg * per, pg * per + per).map((row, r) => (
+          <Box flexDirection="row" gap={1}>
+            {row.map((a, c) => card(a, (pg * per + r) * cols + c))}
+          </Box>
+        ))}
       </Box>,
     )
   })
