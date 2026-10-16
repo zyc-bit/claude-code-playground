@@ -251,13 +251,15 @@ export const register: Register = on => {
       )
     }
 
-    // The grid: a card per agent, as many a row as fit (up to three), the newest first.
+    // The grid: a card per agent, as many a row as fit (up to three), the newest
+    // first. Every card is drawn; past the pane's height the engine's scroll
+    // window carries the rest (the pane's keys scroll it while focused).
     const running = list.filter(a => a.status === 'running').length
     const cols = Math.max(1, Math.min(3, Math.floor(width / CARD_MIN)))
     const cardWidth = Math.floor((width - (cols - 1)) / cols) // one cell of gap between cards
     const card = (a: RadarAgent, i: number) => (
       <Box flexDirection="column" width={cardWidth} borderStyle="round" borderColor={a.id === inView ? 'cyan' : 'inactive'} paddingX={1}>
-        <Button key={`agent-${a.id}`} plain hotkey={String(i + 1)} dimColor={a.status !== 'running'} label={`${icon(a)} ${a.description}`} onPress={choose(a.id)} />
+        <Button key={`agent-${a.id}`} plain hotkey={i < 9 ? String(i + 1) : undefined} dimColor={a.status !== 'running'} label={`${icon(a)} ${a.description}`} onPress={choose(a.id)} />
         <Text dimColor wrap="truncate-end">{`${a.type} · ${elapsed(a)} · ${a.tools} tools`}</Text>
         <Text color={color(a)} wrap="truncate-end">{a.status === 'done' ? 'finished' : a.last}</Text>
         {a.said && <Text dimColor wrap="truncate-end">{`“${a.said}”`}</Text>}
@@ -267,12 +269,11 @@ export const register: Register = on => {
       <Box flexDirection="column">
         <Text bold>{`${running} running · ${list.length - running} finished`}</Text>
         {list.length === 0 && <Text dimColor>No subagents yet this session.</Text>}
-        {chunk(list.slice(0, 9), cols).map((row, r) => (
+        {chunk(list, cols).map((row, r) => (
           <Box flexDirection="row" gap={1}>
             {row.map((a, c) => card(a, r * cols + c))}
           </Box>
         ))}
-        {list.length > 9 && <Text dimColor>{`… ${list.length - 9} older`}</Text>}
         <Box flexDirection="row" gap={1}>
           <Button key="clear" label="Clear finished" hotkey="c" onPress={() => update($, agents, all => all.filter(x => x.status === 'running'))} />
           {toMain}
