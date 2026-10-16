@@ -204,4 +204,43 @@ describe('mission-control', () => {
     expect(root.children.map((c: any) => c.props.key)).toEqual(['band:where-am-i', 'band:mission-control'])
     await band.unmount()
   })
+
+  test('the crab at the pane\'s foot acts out the work', async ($, on) => {
+    engine(on)
+    await $.session.start({ surface: 'terminal', isInteractive: true, cwd: '/repo' } as any)
+    await $.turn.start({ text: 'fix the login bug', turnId: 't1' } as any)
+    await $.tool.call({ tool: 'Read', file_path: '/repo/src/pages/login.tsx', tool_use_id: 'u1' } as any)
+    const pane = await $.ui.mount({ plugin: 'mission-control', surface: 'terminal', ...PANE } as any)
+    expect(await pane.find({ type: 'Text', text: /Claude is reading/ })).toBeDefined() // the scene's words
+    expect(await pane.find({ type: 'Text', text: /▐▛███▜▌/ })).toBeDefined() // the crab itself
+    expect(await pane.find({ type: 'Text', text: /login\.tsx/ })).toBeDefined() // the detail beside them
+    // the band says it too
+    const band = await $.ui.mount({ plugin: 'mission-control', surface: 'terminal', ...BAND } as any)
+    expect(await band.find({ type: 'Text', text: /Claude is reading/ })).toBeDefined()
+    await band.unmount()
+    // /mission crab hides it, and brings it back
+    await $.command.run({ command: 'mission', args: 'crab' } as any)
+    expect(await pane.find({ type: 'Text', text: /Claude is reading/ })).toBeUndefined()
+    expect(await pane.find({ type: 'Text', text: /◆ main · fix the login bug/ })).toBeDefined() // the tree keeps its rows back
+    await $.command.run({ command: 'mission', args: 'crab' } as any)
+    expect(await pane.find({ type: 'Text', text: /Claude is reading/ })).toBeDefined()
+    // the turn ends well
+    await $.turn.complete({ reason: 'answer', answer: 'done', durationMs: 1 } as any)
+    expect(await pane.find({ type: 'Text', text: /^Done!/ })).toBeDefined()
+    await pane.unmount()
+  })
+
+  test('a helper at work says so in the crab\'s line', async ($, on) => {
+    engine(on)
+    await $.session.start({ surface: 'terminal', isInteractive: true, cwd: '/repo' } as any)
+    await $.turn.start({ text: 'go', turnId: 't1' } as any)
+    await $.tool.call({ tool: 'Agent', description: 'test login flow', tool_use_id: 'u0' } as any) // the crab shows the delegation
+    await $.agent.spawn({ prompt: 'check it', description: 'test login flow' } as any) // agent ag1
+    await mockClock.advance(1300) // the held scene lets the helpers' line through
+    await $.tool.call({ tool: 'Read', agentId: 'ag1', tool_use_id: 'u1', file_path: '/repo/src/pages/login.tsx' } as any) // the helper reads
+    const pane = await $.ui.mount({ plugin: 'mission-control', surface: 'terminal', ...PANE } as any)
+    expect(await pane.find({ type: 'Text', text: /Claude is putting helpers to work/ })).toBeDefined()
+    expect(await pane.find({ type: 'Text', text: /test login flow: reading/ })).toBeDefined()
+    await pane.unmount()
+  })
 })

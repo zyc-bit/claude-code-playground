@@ -23,3 +23,6 @@ build/
 Thumbs.db
 .idea/
 .vscode/
+
+# Generated mod editor types (written when Claude Code loads a mod from disk)
+claude-code/mods/*/.claude-plugin/types/

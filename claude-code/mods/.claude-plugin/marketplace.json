@@ -65,7 +65,7 @@
     {
       "name": "mission-control",
       "source": "./mission-control",
-      "description": "/mission opens a live map of the main agent, its subagents and every tool call, plus a code map of the files they touch."
+      "description": "/mission opens a live map of the main agent, its subagents and every tool call, plus a code map of the files they touch; a crab at the pane's foot acts out what Claude is doing."
     },
     {
       "name": "next-steps",
