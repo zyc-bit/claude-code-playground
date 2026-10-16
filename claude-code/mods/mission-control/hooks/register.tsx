@@ -20,7 +20,7 @@ import {
   whole,
 } from './activity'
 import type { Helper, Lingering } from './activity'
-import { DEMO, LABELS, sceneRows } from './crab'
+import { CRAB_WIDTH, DEMO, LABELS, sceneRows } from './crab'
 import { importsOf, svg } from './map'
 import { label, lines, summary } from './tree'
 import { bandsFile, parseOrder, stackBands } from './bands'
@@ -697,7 +697,8 @@ export const register: Register = on => {
     const { Box, Text, Button } = $.ui.resolve(e)
     await read($, now) // subscribes the pane to the clock
     const v = await read($, view)
-    const rows = Math.max(6, (e.props.scroll?.bodyRows ?? 30) - 3)
+    const bodyRows = e.props.scroll?.bodyRows ?? 30
+    const rows = Math.max(6, bodyRows - 3)
     const columns = Math.max(20, e.props.bodyColumns)
     const head = (
       <Box flexDirection="row" gap={1}>
@@ -749,8 +750,10 @@ export const register: Register = on => {
     // The tree keeps at least three rows however short the pane; past that
     // the crab's block gives way to the engine's scroll window.
     const shown = ls.slice(hidden ? -rows + 1 : -Math.max(3, rows - 1 - CRAB_FOOT_ROWS))
+    // With the crab the column is as tall as the body, and the spacer before the
+    // crab takes what the tree leaves, so the crab sits at the pane's foot.
     return (
-      <Box flexDirection="column">
+      <Box flexDirection="column" minHeight={crab !== undefined ? bodyRows : undefined}>
         {head}
         <Text dimColor>{`${s.agents} agents (${s.running} running) · ${s.tools} tool calls${s.failed ? ` · ${s.failed} failed` : ''}`}</Text>
         {ls.length === 0 && <Text dimColor>Nothing yet. Start a task and watch it fill in.</Text>}
@@ -762,10 +765,11 @@ export const register: Register = on => {
             </Text>
           </Text>
         ))}
+        {crab !== undefined && acted !== undefined && <Box flexGrow={1} />}
         {crab !== undefined && acted !== undefined && <Text>{' '}</Text>}
         {crab !== undefined && acted !== undefined && (
           <Box flexDirection="row" gap={2} flexShrink={0}>
-            <Box flexDirection="column" flexShrink={0}>
+            <Box flexDirection="column" flexShrink={0} width={CRAB_WIDTH}>
               {crab.crab.map(row => (
                 <Text color="claude">{row}</Text>
               ))}

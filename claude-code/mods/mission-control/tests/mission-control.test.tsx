@@ -1,5 +1,6 @@
 import { describe, expect, mock, test } from 'claude-code/testing'
 
+import { CRAB_WIDTH, DEMO, crabRows } from '../hooks/crab'
 import { edges, fit, importsOf, layout, svg, titleOf, wrap } from '../hooks/map'
 import { label, lines, summary } from '../hooks/tree'
 import { cap, resetBandOrder } from '../hooks/register'
@@ -227,6 +228,56 @@ describe('mission-control', () => {
     // the turn ends well
     await $.turn.complete({ reason: 'answer', answer: 'done', durationMs: 1 } as any)
     expect(await pane.find({ type: 'Text', text: /^Done!/ })).toBeDefined()
+    await pane.unmount()
+  })
+
+  test('the crab moves: legs, eyes and claws change with the tick, and it keeps its width', () => {
+    // a working crab starts in the pose the logo has, in the middle of its field
+    expect(crabRows('coding', 0)).toEqual(['  ▐▛███▜▌  ', ' ▝▜█████▛▘ ', '   ▘▘ ▝▝   '])
+    // every scene, every tick: three rows of the same width, so the prop beside it never jumps
+    for (const activity of [...DEMO, 'idle' as const]) {
+      for (let tick = 0; tick < 60; tick++) {
+        const rows = crabRows(activity, tick)
+        expect(rows.map(r => r.length)).toEqual([CRAB_WIDTH, CRAB_WIDTH, CRAB_WIDTH])
+      }
+      expect(crabRows(activity, 60)).toEqual(crabRows(activity, 0)) // the tick wraps at 60 without a jump
+    }
+    // working: the legs alternate and the crab scuttles to and fro
+    expect(crabRows('coding', 0)[2]).not.toBe(crabRows('coding', 1)[2])
+    expect(new Set(Array.from({ length: 4 }, (_, t) => crabRows('coding', t)[1])).size).toBe(3)
+    // working: now and then it blinks
+    expect(crabRows('coding', 9)[0]).toContain('▐█████▌')
+    expect(crabRows('coding', 8)[0]).toContain('▐▛███▜▌')
+    // waiting: it looks left and right instead
+    const eyes = Array.from({ length: 4 }, (_, t) => crabRows('thinking', t)[0]!.trim())
+    expect(eyes).toEqual(['▐▛███▜▌', '▐▜███▜▌', '▐▛███▜▌', '▐▛███▛▌'])
+    // idle: asleep, eyes shut and still
+    expect(crabRows('idle', 0)[0]).toContain('▐█████▌')
+    expect(crabRows('idle', 3)).toEqual(crabRows('idle', 0))
+    // done: it waves a claw, one then the other
+    expect(crabRows('done', 0)[0]).toContain('▗')
+    expect(crabRows('done', 1)[0]).toContain('▖')
+    // error: it shakes
+    expect(crabRows('error', 0)[0]).not.toBe(crabRows('error', 1)[0])
+  })
+
+  test('the crab sits at the foot of the pane, however short the tree', async ($, on) => {
+    engine(on)
+    await $.session.start({ surface: 'terminal', isInteractive: true, cwd: '/repo' } as any)
+    await $.turn.start({ text: 'go', turnId: 't1' } as any)
+    await $.tool.call({ tool: 'Read', file_path: '/repo/src/a.ts', tool_use_id: 'u1' } as any)
+    const pane = await $.ui.mount({ plugin: 'mission-control', surface: 'terminal', ...PANE } as any)
+    const root: any = await pane.drawn()
+    expect(root.props.minHeight).toBe(30) // the column is as tall as the body
+    const kids = (root.children as any[]).filter(c => c !== false && c != null)
+    const spacer = kids.findIndex(c => c.props?.flexGrow === 1)
+    expect(spacer).toBeGreaterThan(0)
+    expect(kids.length - spacer - 1).toBe(2) // after it only the blank line and the crab's row
+    expect(kids.slice(0, spacer).length).toBeLessThan(10) // the tree stays above it
+    // with the crab hidden the tree keeps the top and nothing is stretched
+    await $.command.run({ command: 'mission', args: 'crab' } as any)
+    const bare: any = await pane.drawn()
+    expect(bare.props.minHeight).toBeUndefined()
     await pane.unmount()
   })
 

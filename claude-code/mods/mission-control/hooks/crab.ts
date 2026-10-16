@@ -1,14 +1,54 @@
-// The crab at the pane's foot: three rows of block glyphs, with the scene's
-// prop beside it as a few frames of glyphs picked by the running tick, and the
-// words each scene says. The scenes come from crab-cam
+// The crab at the pane's foot: three rows of block glyphs that move with the
+// running tick (legs, eyes, claws), with the scene's prop beside it as a few
+// frames of glyphs picked by the same tick, and the words each scene says. The scenes come from crab-cam
 // (https://github.com/sTomerG/agent-kit), which draws them above the prompt.
 import type { Activity } from '../types'
-
-export const CRAB_ROWS = [' ▐▛███▜▌ ', '▝▜█████▛▘', '  ▘▘ ▝▝  '] as const
 
 type Frame = readonly [string, string, string]
 
 const NO_PROP: Frame = ['', '', '']
+
+// The crab is nine cells wide, set in a field two wider so it can scuttle.
+export const CRAB_WIDTH = 11
+
+// The two eyes are the notches in the top row's corner blocks: ▛ lacks its lower right
+// quarter, ▜ its lower left. Swapping which quarter is missing turns the eyes, a solid
+// block shuts them.
+const EYES = { open: ['▛', '▜'], shut: ['█', '█'], left: ['▜', '▜'], right: ['▛', '▛'] } as const
+const LEGS = ['  ▘▘ ▝▝  ', '  ▝▝ ▘▘  '] as const
+
+type Eyes = keyof typeof EYES
+
+// One pose: the eyes, a claw raised (or none), which legs are down, and how far the crab
+// has scuttled in its field (1 is the middle).
+function pose(eyes: Eyes, claw: 'none' | 'left' | 'right', legs: 0 | 1, at: 0 | 1 | 2): Frame {
+  const [l, r] = EYES[eyes]
+  const rows = [
+    `${claw === 'left' ? '▗' : ' '}▐${l}███${r}▌${claw === 'right' ? '▖' : ' '}`,
+    `${claw === 'left' ? ' ' : '▝'}▜█████▛${claw === 'right' ? ' ' : '▘'}`,
+    LEGS[legs],
+  ] as const
+  const field = (row: string) => `${' '.repeat(at)}${row}${' '.repeat(2 - at)}`
+
+  return [field(rows[0]), field(rows[1]), field(rows[2])]
+}
+
+// Scenes where Claude is waiting on something and the crab looks about instead of moving.
+const WATCHING: ReadonlySet<Activity> = new Set(['thinking', 'waiting', 'asking', 'permission', 'compacting'])
+const LOOKING = ['open', 'left', 'open', 'right'] as const
+const SCUTTLE = [1, 2, 1, 0] as const
+
+// The crab on a tick: asleep when idle, claws up and down when done, shaking on an error,
+// looking about while Claude waits, and otherwise scuttling to and fro on its legs with
+// a blink now and then. Every cycle divides 60, where the tick wraps.
+export function crabRows(activity: Activity, tick: number): Frame {
+  if (activity === 'idle') return pose('shut', 'none', 0, 1)
+  if (activity === 'done') return pose('open', tick % 2 === 0 ? 'left' : 'right', 0, 1)
+  if (activity === 'error') return pose('open', 'none', 0, tick % 2 === 0 ? 0 : 2)
+  if (WATCHING.has(activity)) return pose(LOOKING[tick % 4]!, 'none', 0, 1)
+
+  return pose(tick % 10 === 9 ? 'shut' : 'open', 'none', (tick % 2) as 0 | 1, SCUTTLE[tick % 4]!)
+}
 
 const PROPS: Record<Activity, readonly Frame[]> = {
   idle: [
@@ -138,7 +178,7 @@ const PROPS: Record<Activity, readonly Frame[]> = {
 export function sceneRows(activity: Activity, tick: number): { crab: Frame; prop: Frame } {
   const frames = PROPS[activity]
 
-  return { crab: CRAB_ROWS, prop: frames[tick % frames.length] ?? NO_PROP }
+  return { crab: crabRows(activity, tick), prop: frames[tick % frames.length] ?? NO_PROP }
 }
 
 // What each scene says, drawn beside the crab.
