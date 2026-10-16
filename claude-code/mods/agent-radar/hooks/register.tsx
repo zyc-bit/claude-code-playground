@@ -1,7 +1,10 @@
 // Agent Radar: what are my subagents cooking?
 //   The band above the prompt has one live line per running subagent: status, time, tool
 //   count and what it is doing right now; a finished one shows a check for 30 s. A toast
-//   says when each finishes. /radar opens a pane with every agent and its messages.
+//   says when each finishes. /radar opens a pane: a grid with one card per agent (two or
+//   three a row when the pane is wide). A number opens that agent: its whole conversation,
+//   a button that puts its transcript in the main view (the prompt then talks to it) and
+//   one that asks it to stop. No call stops a subagent outright, so that is a message.
 import { atom, read, update } from 'claude-code'
 import type { EngineInterface, Register } from 'claude-code'
 
@@ -11,11 +14,15 @@ import { bandsFile, parseOrder, stackBands } from './bands'
 const PANE = 'agent-radar'
 const SHOW_DONE_MS = 30_000 // a finished agent stays in the band this long
 const BAND_ROWS = 4
+const CARD_MIN = 40 // a grid column is at least this wide
+const MAX_MESSAGES = 200 // an agent's page shows its last this many messages
+const STOP_TEXT = 'Please stop: finish the step you are on, start nothing new, and reply with what you have so far.'
 
 // Held by the host, so the radar survives a hot reload of this file.
 const agents = atom({ plugin: 'agent-radar', key: 'agents' } as const, [] as RadarAgent[])
 const selected = atom({ plugin: 'agent-radar', key: 'selected' } as const, null as string | null)
 const now = atom({ plugin: 'agent-radar', key: 'now' } as const, 0)
+const notice = atom({ plugin: 'agent-radar', key: 'notice' } as const, null as string | null) // what the last button press came to
 
 let bandOrder: Promise<string[]> | undefined // read once per session: restart to apply
 
@@ -52,13 +59,24 @@ export const register: Register = on => {
     return next(e)
   })
 
+  // Each step a subagent's model answers: keep its latest words for its card.
+  on('turn.step', async function* ($, e, next) {
+    const r = yield* next(e)
+    if (e.agentId && r.answer.trim()) {
+      const id = e.agentId
+      const said = oneLine(r.answer).slice(0, 500)
+      await update($, agents, list => list.map(a => (a.id === id ? { ...a, said } : a))).catch(() => {})
+    }
+    return r
+  })
+
   on('turn.complete', async ($, e, next) => {
     const r = await next(e)
     if (e.agentId) {
       const id = e.agentId
       const failed = e.reason === 'error' || e.reason === 'aborted'
       const list = await update($, agents, all =>
-        all.map(a => (a.id === id ? { ...a, status: failed ? 'failed' : 'done', endedAt: Date.now(), last: failed ? `stopped: ${e.reason}` : 'finished' } : a)),
+        all.map((a): RadarAgent => (a.id === id ? { ...a, status: failed ? 'failed' : 'done', endedAt: Date.now(), last: failed ? `stopped: ${e.reason}` : 'finished' } : a)),
       )
       const one = list.find(a => a.id === id)
       if (one) $.ui.toast(`${failed ? '✗' : '✓'} ${one.description} ${failed ? 'failed' : 'done'} (${elapsed(one)} · ${one.tools} tools)`)
@@ -69,6 +87,7 @@ export const register: Register = on => {
   on('command.run', { command: 'radar' }, async $ => {
     await adopt($)
     await update($, selected, () => null)
+    await update($, notice, () => null)
     await $.ui.open({ id: PANE, title: 'Agent Radar', focus: true })
     const list = await read($, agents)
     const running = list.filter(a => a.status === 'running').length
@@ -104,10 +123,25 @@ export const register: Register = on => {
     const list = await read($, agents)
     const pick = await read($, selected)
     const one = list.find(a => a.id === pick)
+    const width = e.props.bodyColumns
+    const inView = e.props.view?.agentId // the agent whose transcript the main view shows, if any
+    const choose = (id: string | null) => async () => {
+      await update($, selected, () => id)
+      await update($, notice, () => null)
+    }
+    const say = (text: string) => update($, notice, () => text)
+    const toMain = inView !== undefined && (
+      <Button key="main" label="Main view" hotkey="m" onPress={async () => {
+        const r = await $.ui.view({}).catch(err => ({ deny: String(err) }))
+        if (r.deny) await say(`Could not go back: ${r.deny}`)
+      }} />
+    )
 
     if (one) {
       const found = await $.session.messages({ agentId: one.id })
-      const messages = 'deny' in found ? [] : found.slice(-6)
+      const all = 'deny' in found ? [] : found
+      const messages = all.slice(-MAX_MESSAGES)
+      const note = await read($, notice)
       return (
         <Box flexDirection="column">
           <Text>
@@ -115,40 +149,75 @@ export const register: Register = on => {
             <Text dimColor>{`  ${one.type} · ${elapsed(one)} · ${one.tools} tools`}</Text>
           </Text>
           <Text dimColor wrap="truncate-end">{`now: ${one.last}`}</Text>
-          <Text dimColor>{'─'.repeat(Math.max(10, e.props.bodyColumns - 2))}</Text>
-          {messages.length === 0 && <Text dimColor>No messages yet.</Text>}
-          {messages.map(m => (
-            <Text wrap="truncate-end">
-              <Text color={m.role === 'assistant' ? 'cyan' : undefined} bold>{m.role === 'assistant' ? 'agent: ' : 'task:  '}</Text>
-              <Text>{m.text.replace(/\s+/g, ' ').slice(0, 400) || '(tool calls)'}</Text>
-            </Text>
-          ))}
-          <Box flexDirection="row" gap={1}>
-            <Button key="back" label="Back" hotkey="b" variant="primary" onPress={() => update($, selected, () => null)} />
+          <Box flexDirection="row" gap={1} flexWrap="wrap">
+            <Button key="back" label="Back" hotkey="b" variant="primary" onPress={choose(null)} />
+            <Button key="view" label="Open transcript" hotkey="o" onPress={async () => {
+              const r = await $.ui.view({ agentId: one.id }).catch(err => ({ deny: String(err) }))
+              await say(r.deny ? `Could not open it: ${r.deny}` : 'Its transcript is in the main view: your next prompt goes to it. m goes back.')
+            }} />
+            {one.status === 'running' && (
+              <Button key="stop" label="Ask to stop" hotkey="s" onPress={async () => {
+                const r = await $.session.send({ to: { agentId: one.id }, text: STOP_TEXT }).catch(err => ({ isDelivered: false as const, reason: String(err) }))
+                await say(r.isDelivered ? 'Asked it to stop. It stops once it reads the message.' : `Not sent: ${r.reason}`)
+              }} />
+            )}
+            <Button key="end" label="Latest" hotkey="e" onPress={() => $.ui.scroll({ in: PANE, to: 'end' })} />
+            {toMain}
             <Button key="close" label="Close" hotkey="q" role="dismiss" onPress={() => $.ui.close({ id: PANE })} />
           </Box>
+          {note && <Text color="yellow">{note}</Text>}
+          <Text dimColor>{'─'.repeat(Math.max(10, width - 2))}</Text>
+          {'deny' in found && <Text dimColor>{`No conversation to show: ${found.deny}`}</Text>}
+          {!('deny' in found) && all.length === 0 && <Text dimColor>No messages yet.</Text>}
+          {all.length > messages.length && <Text dimColor>{`… ${all.length - messages.length} earlier messages not shown`}</Text>}
+          {messages.map((m, i) => {
+            const text = m.text.trim()
+            const uses = m.role === 'assistant' ? m.toolUses : []
+            if (!text && uses.length === 0) return null // a row of tool results only
+            const who = m.role === 'assistant' ? 'agent: ' : i === 0 && all.length === messages.length ? 'task: ' : 'user: '
+            return (
+              <Box flexDirection="column" marginTop={i > 0 ? 1 : 0}>
+                {text && (
+                  <Text>
+                    <Text color={m.role === 'assistant' ? 'cyan' : 'magenta'} bold>{who}</Text>
+                    <Text>{text}</Text>
+                  </Text>
+                )}
+                {uses.map(u => (
+                  <Text dimColor wrap="truncate-end">{`  → ${describe({ ...u.input, tool: u.tool })}${u.isError ? ' (error)' : ''}`}</Text>
+                ))}
+              </Box>
+            )
+          })}
         </Box>
       )
     }
 
+    // The grid: a card per agent, as many a row as fit (up to three), the newest first.
     const running = list.filter(a => a.status === 'running').length
+    const cols = Math.max(1, Math.min(3, Math.floor(width / CARD_MIN)))
+    const cardWidth = Math.floor((width - (cols - 1)) / cols) // one cell of gap between cards
+    const card = (a: RadarAgent, i: number) => (
+      <Box flexDirection="column" width={cardWidth} borderStyle="round" borderColor={a.id === inView ? 'cyan' : 'inactive'} paddingX={1}>
+        <Button key={`agent-${a.id}`} plain hotkey={String(i + 1)} dimColor={a.status !== 'running'} label={`${icon(a)} ${a.description}`} onPress={choose(a.id)} />
+        <Text dimColor wrap="truncate-end">{`${a.type} · ${elapsed(a)} · ${a.tools} tools`}</Text>
+        <Text color={color(a)} wrap="truncate-end">{a.status === 'done' ? 'finished' : a.last}</Text>
+        {a.said && <Text dimColor wrap="truncate-end">{`“${a.said}”`}</Text>}
+      </Box>
+    )
     return (
       <Box flexDirection="column">
         <Text bold>{`${running} running · ${list.length - running} finished`}</Text>
         {list.length === 0 && <Text dimColor>No subagents yet this session.</Text>}
-        {list.slice(0, 9).map((a, i) => (
-          <Button
-            key={`agent-${a.id}`}
-            plain
-            hotkey={String(i + 1)}
-            dimColor={a.status !== 'running'}
-            label={`${icon(a)} ${a.description} · ${elapsed(a)} · ${a.tools} tools${a.status === 'done' ? '' : ` · ${a.last}`}`}
-            onPress={() => update($, selected, () => a.id)}
-          />
+        {chunk(list.slice(0, 9), cols).map((row, r) => (
+          <Box flexDirection="row" gap={1}>
+            {row.map((a, c) => card(a, r * cols + c))}
+          </Box>
         ))}
         {list.length > 9 && <Text dimColor>{`… ${list.length - 9} older`}</Text>}
         <Box flexDirection="row" gap={1}>
           <Button key="clear" label="Clear finished" hotkey="c" onPress={() => update($, agents, all => all.filter(x => x.status === 'running'))} />
+          {toMain}
           <Button key="close" label="Close" hotkey="q" role="dismiss" onPress={() => $.ui.close({ id: PANE })} />
         </Box>
       </Box>
@@ -187,6 +256,18 @@ async function adopt($: EngineInterface) {
 // Running, or finished in the last 30 s.
 export function isShown(a: RadarAgent, at = Date.now()) {
   return a.status === 'running' || (a.endedAt !== undefined && at - a.endedAt < SHOW_DONE_MS)
+}
+
+// Whitespace runs as one space, the ends trimmed.
+export function oneLine(text: string) {
+  return text.replace(/\s+/g, ' ').trim()
+}
+
+// The list in rows of `size`.
+export function chunk<T>(list: T[], size: number): T[][] {
+  const rows: T[][] = []
+  for (let i = 0; i < list.length; i += size) rows.push(list.slice(i, i + size))
+  return rows
 }
 
 function icon(a: RadarAgent) {

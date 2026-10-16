@@ -25,7 +25,7 @@
     {
       "name": "agent-radar",
       "source": "./agent-radar",
-      "description": "One live line above the prompt per running subagent: time, tool count and what it's doing. /radar shows every agent and its messages."
+      "description": "One live line above the prompt per running subagent: time, tool count and what it's doing. /radar opens a grid of agent cards; each opens to its whole conversation, with buttons to show its transcript in the main view or ask it to stop."
     },
     {
       "name": "browser-lanes",
