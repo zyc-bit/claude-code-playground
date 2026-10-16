@@ -1,6 +1,6 @@
 {
   "name": "agent-radar",
-  "version": "0.1.3",
+  "version": "0.1.4",
   "description": "One live line above the prompt per running subagent: time, tool count and what it's doing. /radar opens a grid of agent cards; each opens to its whole conversation, with buttons to show its transcript in the main view or ask it to stop. With mission-control on, its crab sits at the foot of the pane too.",
   "author": {
     "name": "Hamza Zafar",
