@@ -1,8 +1,9 @@
 // Context Bar: what is filling my context window?
 //   Above the prompt, the window as one stacked bar, a color per category as /context
 //   draws them (system prompt, tools, MCP tools, memory files, skills, messages, free),
-//   with a legend of tokens and shares and where auto-compaction runs. It refreshes after
-//   each turn. /context-bar shows or hides it, and the choice is kept across sessions.
+//   with a legend of tokens and shares and where auto-compaction runs. It refreshes as a
+//   turn goes (at each request) and again when the turn ends. /context-bar shows or hides
+//   it, and the choice is kept across sessions.
 //   Above the bar, one info row: folder, git branch with its unpushed commits and the
 //   working tree's changes, model and effort (from the model-effort-band mod). It is read
 //   at start, after each turn and after /model, /effort, /clear, /compact, /fast and /cd,
@@ -49,11 +50,13 @@ export const register: Register = on => {
     return r
   })
 
-  // Each request the main loop sends: note the model and effort it really used.
+  // Each request the main loop sends: note the model and effort it really used,
+  // and read the window again — it grows between the requests of one turn.
   on('turn.step', async function* ($, e, next) {
     if (e.agentId !== undefined) return yield* next(e)
     await update($, model, () => e.model).catch(() => {})
     await update($, effort, () => e.effort ?? null).catch(() => {})
+    void refresh($).catch(() => {})
     return yield* next(e)
   })
 
@@ -66,23 +69,39 @@ export const register: Register = on => {
     return r
   })
 
-  // A failed refresh must not touch the command itself: let it through.
+  // A failed refresh must not touch the command itself: let it through, and
+  // never run a command twice when the handler failed past its own next(e).
   on('command.run', async ($, e, next) => {
     const r = await next(e)
+    if (e.command === 'clear') await refresh($).catch(() => note($, 'reading the window after /clear failed')) // a /clear empties the window without a turn ending
     if (REFRESH_COMMANDS.includes(e.command)) await refreshInfo($).catch(() => {})
     return r
-  }).catch(($, e, next) => next(e))
+  }).catch(($, e, next) => (next.called ? { text: '' } : next(e)))
 
   on('session.compact', async ($, e, next) => {
     const r = await next(e)
-    if (!e.agentId && 'messages' in r) void refresh($).catch(() => {}) // a /compact empties the window without a turn ending
+    if (!e.agentId && r.skip === undefined && 'messages' in r) {
+      // The engine reads the window by its last response, and a compaction opens
+      // one that has yet to answer: the size the event carries is all there is
+      // until the next turn. Without it (a precompute), ask as before.
+      const after = r.tokensAfter
+      const now = after === undefined ? null : await read($, reading)
+      if (now === null || after === undefined) {
+        void refresh($).catch(() => note($, 'reading the window after a compaction failed'))
+      } else {
+        await update($, reading, () => compacted(now, after)).catch(() => note($, 'writing the reading after a compaction was refused'))
+      }
+    }
     return r
   })
 
   on('command.run', { command: 'context-bar' }, async $ => {
     const hidden = await update($, isHidden, h => !h)
     await $.store.set('isHidden', hidden).catch(() => {})
-    if (!hidden) await refresh($).catch(() => {})
+    if (!hidden) {
+      await refresh($).catch(() => {})
+      await refreshInfo($).catch(() => {}) // the folder, branch and model may have moved while it was hidden
+    }
     return { text: hidden ? 'Context bar hidden. /context-bar shows it again' : 'Context bar on' }
   })
 
@@ -270,12 +289,21 @@ export function resetBandOrder() {
   bandOrder = undefined
 }
 
+// Says a failure to see the window to the debug log, where it can be found;
+// the bar keeps its last reading either way.
+const note = ($: EngineInterface, what: string) => {
+  $.ui.log(`context-bar: ${what}`, { to: 'debug' })
+}
+
 // Asks the engine for /context's breakdown, estimated locally (no token-count calls).
 async function refresh($: EngineInterface) {
   if (await read($, isHidden)) return
   const usage = await $.session.usage({ breakdown: 'summary' })
   const b = usage.context.breakdown
-  if (!b || !(b.rawMaxTokens > 0)) return // no window to measure against
+  if (!b || !(b.rawMaxTokens > 0)) {
+    note($, 'the engine offered no window to measure')
+    return
+  }
   await update($, reading, () => toReading(b))
 }
 
@@ -302,6 +330,21 @@ export function toReading(b: {
     window: b.rawMaxTokens,
     percent: b.percentage,
     compactsAt: b.isAutoCompactEnabled ? b.autoCompactThreshold : undefined,
+  }
+}
+
+// A reading shrunk to what a compaction left: the rows that are not the
+// conversation keep their tokens, messages takes the rest, and free space and
+// the percentage close around the new total.
+export function compacted(r: Reading, tokensAfter: number): Reading {
+  const fixed = r.slices.filter(s => s.kind === 'used' && s.name !== 'messages').reduce((n, s) => n + s.tokens, 0)
+  const total = Math.min(Math.max(tokensAfter, fixed), r.window)
+  const buffer = r.slices.find(s => s.kind === 'buffer')?.tokens ?? 0
+  return {
+    ...r,
+    slices: r.slices.map(s => (s.name === 'messages' ? { ...s, tokens: total - fixed } : s.kind === 'free' ? { ...s, tokens: Math.max(0, r.window - total - buffer) } : s)),
+    total,
+    percent: Math.round((total / r.window) * 100),
   }
 }
 

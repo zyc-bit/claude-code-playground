@@ -1,6 +1,6 @@
 import { describe, expect, test } from 'claude-code/testing'
 
-import { cells, legend, parseStatus, resetBandOrder, share, shortenPath, toReading, tokens } from '../hooks/register'
+import { cells, compacted, legend, parseStatus, resetBandOrder, share, shortenPath, toReading, tokens } from '../hooks/register'
 
 const BAND = { component: 'AbovePrompt', props: { hasSurvey: false, isWorking: false, maxRows: 20, bodyColumns: 84 } }
 
@@ -35,6 +35,7 @@ const BREAKDOWN = {
 function engine(on: any, store: Record<string, unknown> = {}, files: Record<string, string> = {}, beneath?: unknown) {
   const asked: unknown[] = []
   const reads: string[] = []
+  let breakdown: any = BREAKDOWN
   resetBandOrder()
   on('env.get', (_$: any, e: any) => ({ value: e.name === 'HOME' ? '/home/me' : undefined }))
   on('fs.exists', (_$: any, e: any) => ({ value: e.path in files }))
@@ -46,10 +47,10 @@ function engine(on: any, store: Record<string, unknown> = {}, files: Record<stri
   on('store.set', (_$: any, e: any) => ((store[e.key] = e.value), { value: undefined }))
   on('session.usage', (_$: any, e: any) => {
     asked.push(e)
-    return { value: { startedAt: 0, context: { tokens: 204_000, window: 1_000_000, percent: 20, breakdown: BREAKDOWN }, rateLimits: {}, cost: { usd: 0 } } }
+    return { value: { startedAt: 0, context: { tokens: 204_000, window: 1_000_000, percent: 20, breakdown }, rateLimits: {}, cost: { usd: 0 } } }
   })
   on('ui.render', ($: any, e: any) => beneath ?? $.ui.resolve(e).Text({ children: 'band below' }))
-  return { asked, store, reads }
+  return { asked, store, reads, setUsage: (b: any) => { breakdown = b } }
 }
 
 const settle = () => new Promise(done => (globalThis as any).setTimeout(done, 20)) // the first refresh runs in the background
@@ -147,14 +148,109 @@ describe('context-bar', () => {
     expect(asked.length).toBe(2)
   })
 
-  test('refreshes after a compaction', async ($, on) => {
+  test('refreshes after a compaction without a size to shrink to', async ($, on) => {
     const { asked } = engine(on)
-    on('session.compact', () => ({ messages: [{ role: 'user', text: 'summary', toolUses: [] }] }))
+    on('session.compact', () => ({ messages: [{ role: 'user', text: 'summary', toolUses: [] }] })) // no tokensAfter: a precompute
     await $.session.start({ surface: 'terminal', isInteractive: true, cwd: '/work' } as any)
     await settle()
     await $.session.compact({ trigger: 'manual', messages: [{ role: 'user', text: 'hi', toolUses: [] }] } as any)
     await settle()
     expect(asked.length).toBe(2)
+  })
+
+  test('a compaction shrinks the bar by the size the event carries', async ($, on) => {
+    const { asked } = engine(on)
+    on('session.compact', () => ({ messages: [{ role: 'user', text: 'summary', toolUses: [] }], tokensAfter: 31_120 }))
+    await $.session.start({ surface: 'terminal', isInteractive: true, cwd: '/work' } as any)
+    await settle()
+    let band = await $.ui.mount({ plugin: 'context-bar', surface: 'terminal', ...BAND } as any)
+    expect(await band.find({ type: 'Text', text: /204k of 1M/ })).toBeDefined()
+    await band.unmount()
+    await $.session.compact({ trigger: 'manual', messages: [{ role: 'user', text: 'hi', toolUses: [] }] } as any)
+    await settle()
+    expect(asked.length).toBe(1) // the window has not answered since: the size the event carries is all there is
+    band = await $.ui.mount({ plugin: 'context-bar', surface: 'terminal', ...BAND } as any)
+    expect(await band.find({ type: 'Text', text: /31k of 1M/ })).toBeDefined()
+    expect(await band.find({ type: 'Text', text: / 3% / })).toBeDefined()
+    await band.unmount()
+  })
+
+  test('compacted shrinks the conversation and closes the rest around it', () => {
+    const r = compacted(toReading(BREAKDOWN), 31_120)
+    expect(r.total).toBe(31_120)
+    expect(r.percent).toBe(3)
+    expect(r.slices.find(s => s.name === 'messages')?.tokens).toBe(13_120) // 31,120 less the rows that stayed
+    expect(r.slices.find(s => s.name === 'free space')?.tokens).toBe(918_880)
+    expect(r.slices.find(s => s.name === 'system prompt')?.tokens).toBe(3_400) // the fixed rows keep their tokens
+    expect(compacted(toReading(BREAKDOWN), 0).total).toBe(18_000) // never below what cannot shrink
+  })
+
+  test('a compaction vetoed leaves the bar alone', async ($, on) => {
+    const { asked } = engine(on)
+    on('session.compact', () => ({ skip: 'the conversation is small already' }))
+    await $.session.start({ surface: 'terminal', isInteractive: true, cwd: '/work' } as any)
+    await settle()
+    await $.session.compact({ trigger: 'manual', messages: [{ role: 'user', text: 'hi', toolUses: [] }] } as any)
+    await settle()
+    expect(asked.length).toBe(1) // nothing was compacted: no new reading
+  })
+
+  test("a turn's requests read the window as the turn goes", async ($, on) => {
+    const { asked } = engine(on)
+    on('turn.step', async function* (_$: any, e: any) {
+      return { turnId: e.turnId, index: e.index, answer: 'Working.', toolUses: [], stopReason: 'end_turn', usage: null } as never
+    })
+    await $.session.start({ surface: 'terminal', isInteractive: true, cwd: '/work' } as any)
+    await settle()
+    expect(asked.length).toBe(1)
+    for await (const _ of $.turn.step({ turnId: 't', index: 0, model: 'claude-opus-5-5', effort: 'xhigh', messageCount: 1 } as any)) {
+      // read the whole stream
+    }
+    await settle()
+    expect(asked.length).toBe(2) // the window grows between the requests of one turn
+    for await (const _ of $.turn.step({ turnId: 't', index: 0, model: 'claude-opus-5-5', effort: 'xhigh', messageCount: 1, agentId: 'a1' } as any)) {
+      // read the whole stream
+    }
+    await settle()
+    expect(asked.length).toBe(2) // a subagent's request fills its own window
+    const band = await $.ui.mount({ plugin: 'context-bar', surface: 'terminal', ...BAND } as any)
+    expect(await band.find({ type: 'Text', text: 'claude-opus-5-5' })).toBeDefined()
+    expect(await band.find({ type: 'Text', text: 'effort: xhigh' })).toBeDefined()
+    await band.unmount()
+  })
+
+  test('/clear reads the window again and the bar follows', async ($, on) => {
+    const { asked, setUsage } = engine(on)
+    on('command.run', () => ({ text: '' })) // core's answer to the command itself
+    await $.session.start({ surface: 'terminal', isInteractive: true, cwd: '/work' } as any)
+    await settle()
+    expect(asked.length).toBe(1)
+    setUsage({ ...BREAKDOWN, categories: BREAKDOWN.categories.map(c => (c.name === 'Messages' ? { ...c, tokens: 13_120 } : c.name === 'Free space' ? { ...c, tokens: 918_880 } : c)), totalTokens: 31_120, percentage: 3 })
+    await $.command.run({ command: 'clear', args: '' } as any)
+    await settle()
+    expect(asked.length).toBe(2) // a /clear empties the window without a turn ending
+    const band = await $.ui.mount({ plugin: 'context-bar', surface: 'terminal', ...BAND } as any)
+    expect(await band.find({ type: 'Text', text: /31k of 1M/ })).toBeDefined()
+    await band.unmount()
+  })
+
+  test('/model reads the model and effort again', async ($, on) => {
+    engine(on)
+    let name = 'claude-opus-5-5'
+    on('session.model', () => ({ value: name }))
+    on('settings.read', () => ({ value: {} }))
+    on('command.run', () => ({ text: '' })) // core's answer to the command itself
+    await $.session.start({ surface: 'terminal', isInteractive: true, cwd: '/work' } as any)
+    await settle()
+    let band = await $.ui.mount({ plugin: 'context-bar', surface: 'terminal', ...BAND } as any)
+    expect(await band.find({ type: 'Text', text: 'claude-opus-5-5' })).toBeDefined()
+    await band.unmount()
+    name = 'claude-haiku-5-5'
+    await $.command.run({ command: 'model', args: '' } as any)
+    await settle()
+    band = await $.ui.mount({ plugin: 'context-bar', surface: 'terminal', ...BAND } as any)
+    expect(await band.find({ type: 'Text', text: 'claude-haiku-5-5' })).toBeDefined()
+    await band.unmount()
   })
 
   test('/context-bar hides and shows it, and remembers the choice', async ($, on) => {
