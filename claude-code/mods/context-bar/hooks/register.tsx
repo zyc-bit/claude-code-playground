@@ -3,10 +3,13 @@
 //   draws them (system prompt, tools, MCP tools, memory files, skills, messages, free),
 //   with a legend of tokens and shares and where auto-compaction runs. It refreshes after
 //   each turn. /context-bar shows or hides it, and the choice is kept across sessions.
+//   Above the bar, one info row: folder, git branch, model and effort (from the
+//   model-effort-band mod). It is read at start, after each turn and after /model, /effort,
+//   /clear, /compact, /fast and /cd, and turn.step keeps the model and effort that were really sent.
 import { atom, read, update } from 'claude-code'
 import type { EngineInterface, Register } from 'claude-code'
 
-import type { Reading, Slice } from '../types'
+import type { Effort, Reading, Slice } from '../types'
 import { bandsFile, parseOrder, stackBands } from './bands'
 
 const MIN_WIDTH = 20 // narrower than this, the bar is not drawn
@@ -21,6 +24,15 @@ const GLYPH = { used: '█', free: '─', buffer: '░' } as const
 // Held by the host, so the bar survives a hot reload of this file.
 const reading = atom({ plugin: 'context-bar', key: 'reading' } as const, null as Reading | null)
 const isHidden = atom({ plugin: 'context-bar', key: 'isHidden' } as const, false)
+// The info row (folder, branch, model, effort), merged in from the model-effort-band mod.
+const model = atom({ plugin: 'context-bar', key: 'model' } as const, null as string | null)
+const effort = atom({ plugin: 'context-bar', key: 'effort' } as const, null as Effort | null)
+const cwd = atom({ plugin: 'context-bar', key: 'cwd' } as const, null as string | null)
+const branch = atom({ plugin: 'context-bar', key: 'branch' } as const, null as string | null)
+
+const EFFORTS = ['low', 'medium', 'high', 'xhigh', 'max']
+// These commands can change the model, effort, folder or branch: read them again once they ran.
+const REFRESH_COMMANDS = ['model', 'effort', 'clear', 'compact', 'fast', 'cd']
 
 let bandOrder: Promise<string[]> | undefined // read once per session: restart to apply
 
@@ -31,14 +43,33 @@ export const register: Register = on => {
     const hidden = (await $.store.get('isHidden').catch(() => undefined)) === true
     await update($, isHidden, () => hidden)
     void refresh($).catch(() => {})
+    void refreshInfo($).catch(() => {})
     return r
+  })
+
+  // Each request the main loop sends: note the model and effort it really used.
+  on('turn.step', async function* ($, e, next) {
+    if (e.agentId !== undefined) return yield* next(e)
+    await update($, model, () => e.model).catch(() => {})
+    await update($, effort, () => e.effort ?? null).catch(() => {})
+    return yield* next(e)
   })
 
   on('turn.complete', async ($, e, next) => {
     const r = await next(e)
-    if (!e.agentId) await refresh($).catch(() => {}) // a subagent's turn fills its own window, not this one
+    if (!e.agentId) {
+      await refresh($).catch(() => {}) // a subagent's turn fills its own window, not this one
+      await refreshWhere($).catch(() => {})
+    }
     return r
   })
+
+  // A failed refresh must not touch the command itself: let it through.
+  on('command.run', async ($, e, next) => {
+    const r = await next(e)
+    if (REFRESH_COMMANDS.includes(e.command)) await refreshInfo($).catch(() => {})
+    return r
+  }).catch(($, e, next) => next(e))
 
   on('session.compact', async ($, e, next) => {
     const r = await next(e)
@@ -56,44 +87,81 @@ export const register: Register = on => {
   on('ui.render', { component: 'AbovePrompt' }, async ($, e, next) => {
     const rest = await next(e) // what other mods and Claude Code draw here stays, drawn above the box so one-row mods stay visible
     const r = await read($, reading)
-    if (e.props.hasSurvey || (await read($, isHidden)) || !r) return rest
+    const name = await read($, model)
+    const level = await read($, effort)
+    const dir = await read($, cwd)
+    const git = await read($, branch)
+    if (e.props.hasSurvey || (await read($, isHidden)) || (!r && name === null && dir === null && git === null)) return rest
     const { Box, Text } = $.ui.resolve(e)
     const inner = e.props.bodyColumns - 4 // the border and padding take 4 cells
     if (inner < MIN_WIDTH) return rest
 
-    const head = `${tokens(r.total)} of ${tokens(r.window)}${r.compactsAt ? ` · compacts at ${tokens(r.compactsAt)}` : ''}`
-    const pct = ` ${r.percent}% `
-    const level = r.compactsAt ? r.total / r.compactsAt : r.total / r.window
-    const mine = (
-      <Box flexDirection="column" borderStyle="round" borderColor="inactive" paddingX={1}>
-        <Box flexDirection="row" justifyContent="space-between">
-          <Text wrap="truncate-end">
-            <Text color="#d97757">{'◆ '}</Text>
-            <Text bold>context</Text>
-          </Text>
-          <Text wrap="truncate-start">
-            <Text dimColor>{`${head} `}</Text>
-            <Text bold color="black" backgroundColor={level >= 0.9 ? 'red' : level >= 0.7 ? 'yellow' : 'green'}>{pct}</Text>
+    // Folder and branch first; when it is tight the folder is cut at its start and the branch at its end, so the model and effort stay.
+    const sep = (
+      <Box flexShrink={0}>
+        <Text dimColor>{' · '}</Text>
+      </Box>
+    )
+    const info = [
+      dir === null ? null : (
+        <Box flexShrink={1} minWidth={0}>
+          <Text color="blue" bold wrap="truncate-start">{dir}</Text>
+        </Box>
+      ),
+      git === null ? null : (
+        <Box flexShrink={1} minWidth={0}>
+          <Text color="green" wrap="truncate">{git}</Text>
+        </Box>
+      ),
+      name === null ? null : (
+        <Box flexShrink={0}>
+          <Text wrap="truncate">
+            <Text color="cyan" bold>{name}</Text>
+            <Text dimColor>{' · '}</Text>
+            <Text color="magenta">{`effort: ${level === null ? 'n/a' : String(level)}`}</Text>
           </Text>
         </Box>
-        <Text>
-          {cells(r, inner).map(c => (
-            <Text color={c.color}>{c.text}</Text>
-          ))}
-        </Text>
-        {legend(r, inner).map(line => (
-          <Text wrap="truncate-end">
-            {line.map((s, i) => (
-              <Text>
-                {i > 0 && <Text>{SPLIT}</Text>}
-                <Text color={s.color}>{s.kind === 'used' ? '■ ' : `${GLYPH[s.kind]} `}</Text>
-                <Text dimColor={s.kind !== 'used'}>{`${s.name} `}</Text>
-                <Text bold={s.kind === 'used'}>{tokens(s.tokens)}</Text>
-                {s.kind === 'used' && <Text dimColor>{` ${share(s.tokens, r.window)}`}</Text>}
-              </Text>
+      ),
+    ].filter(x => x !== null)
+    const infoRow = info.length === 0 ? [] : [<Box flexDirection="row">{info.flatMap((x, i) => (i > 0 ? [sep, x] : [x]))}</Box>]
+
+    const used = r ? (r.compactsAt ? r.total / r.compactsAt : r.total / r.window) : 0
+    const bar = !r
+      ? []
+      : [
+          <Box flexDirection="row" justifyContent="space-between">
+            <Text wrap="truncate-end">
+              <Text color="#d97757">{'◆ '}</Text>
+              <Text bold>context</Text>
+            </Text>
+            <Text wrap="truncate-start">
+              <Text dimColor>{`${tokens(r.total)} of ${tokens(r.window)}${r.compactsAt ? ` · compacts at ${tokens(r.compactsAt)}` : ''} `}</Text>
+              <Text bold color="black" backgroundColor={used >= 0.9 ? 'red' : used >= 0.7 ? 'yellow' : 'green'}>{` ${r.percent}% `}</Text>
+            </Text>
+          </Box>,
+          <Text>
+            {cells(r, inner).map(c => (
+              <Text color={c.color}>{c.text}</Text>
             ))}
-          </Text>
-        ))}
+          </Text>,
+          ...legend(r, inner).map(line => (
+            <Text wrap="truncate-end">
+              {line.map((s, i) => (
+                <Text>
+                  {i > 0 && <Text>{SPLIT}</Text>}
+                  <Text color={s.color}>{s.kind === 'used' ? '■ ' : `${GLYPH[s.kind]} `}</Text>
+                  <Text dimColor={s.kind !== 'used'}>{`${s.name} `}</Text>
+                  <Text bold={s.kind === 'used'}>{tokens(s.tokens)}</Text>
+                  {s.kind === 'used' && <Text dimColor>{` ${share(s.tokens, r.window)}`}</Text>}
+                </Text>
+              ))}
+            </Text>
+          )),
+        ]
+    const mine = (
+      <Box flexDirection="column" borderStyle="round" borderColor="inactive" paddingX={1}>
+        {infoRow}
+        {bar}
       </Box>
     )
     return stackBands(rest, 'context-bar', mine, 'below', await (bandOrder ??= readBandOrder($).catch(() => []))) // below what other mods draw, unless the band order says otherwise
@@ -104,6 +172,43 @@ export const register: Register = on => {
 async function readBandOrder($: EngineInterface): Promise<string[]> {
   const file = bandsFile(await $.env.get('CLAUDE_CONFIG_DIR'), await $.env.get('HOME'))
   return file && (await $.fs.exists(file)) ? parseOrder(await $.fs.read(file)) : []
+}
+
+// A path under the home folder, written with ~.
+export const shortenPath = (path: string, home: string | undefined): string =>
+  home && home !== '/' && (path === home || path.startsWith(`${home}/`)) ? `~${path.slice(home.length)}` : path
+
+const isEffort = (value: unknown): value is Effort => typeof value === 'number' || (typeof value === 'string' && EFFORTS.includes(value))
+
+// The current branch; a short sha when HEAD is detached; null outside a repository or without git.
+export async function readBranch($: EngineInterface): Promise<string | null> {
+  try {
+    const ref = await $.process.run(['git', 'symbolic-ref', '--short', '-q', 'HEAD'], { timeoutMs: 5000 })
+    if (ref.exitCode === 0) return ref.stdout.trim() || null
+    if (ref.exitCode !== 1) return null // 1 is a detached HEAD, anything else (128) is no repository
+    const sha = await $.process.run(['git', 'rev-parse', '--short', 'HEAD'], { timeoutMs: 5000 })
+    return sha.exitCode === 0 && sha.stdout.trim() ? `@${sha.stdout.trim()}` : null
+  } catch {
+    return null
+  }
+}
+
+async function refreshWhere($: EngineInterface) {
+  const dir = shortenPath(await $.session.cwd(), await $.env.get('HOME'))
+  await update($, cwd, () => dir)
+  const name = await readBranch($)
+  await update($, branch, () => name)
+}
+
+// Before the first request only /model and settings tell the model and effort; after it, turn.step does.
+async function refreshInfo($: EngineInterface) {
+  await refreshWhere($).catch(() => {})
+  const name = await $.session.model()
+  await update($, model, () => name)
+  const settings = await $.settings.read()
+  const perModel = settings.modelSettings as Record<string, { effortLevel?: unknown }> | undefined
+  const level = perModel?.[name]?.effortLevel ?? settings.effortLevel // a per-model effort beats the top-level one
+  if (isEffort(level)) await update($, effort, () => level)
 }
 
 // Forgets the cached band order, for tests.

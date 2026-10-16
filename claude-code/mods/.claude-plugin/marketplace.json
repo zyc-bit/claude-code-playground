@@ -21,6 +21,116 @@
       "name": "token-weather",
       "source": "./token-weather",
       "description": "A live forecast of the context window, drawn above the prompt."
+    },
+    {
+      "name": "agent-radar",
+      "source": "./agent-radar",
+      "description": "One live line above the prompt per running subagent: time, tool count and what it's doing. /radar shows every agent and its messages."
+    },
+    {
+      "name": "browser-lanes",
+      "source": "./browser-lanes",
+      "description": "Shows if this session has a Playwright browser and who holds it. /browser clean closes leftover browsers. A subagent that wants the browser waits until the one using it is done."
+    },
+    {
+      "name": "cache-clock",
+      "source": "./cache-clock",
+      "description": "A prompt-cache line under your status line, from Claude Code's own cache figures: time left while warm, hit rate and misses, and how many tokens the next message re-caches once cold. /cache-clock setup adds it."
+    },
+    {
+      "name": "context-bar",
+      "source": "./context-bar",
+      "description": "Your context window as a stacked bar above the prompt, a color per category, with token counts and the compaction point, plus one row with folder, git branch, model and effort. /context-bar shows or hides it."
+    },
+    {
+      "name": "glance",
+      "source": "./glance",
+      "description": "One line above the prompt with what needs you: next meeting, PRs, Linear issues and Slack DMs. /glance lists them all."
+    },
+    {
+      "name": "heatmap",
+      "source": "./heatmap",
+      "description": "A GitHub-style grid of your Claude Code time in a /heatmap pane, with streaks, peaks and top projects."
+    },
+    {
+      "name": "md-preview",
+      "source": "./md-preview",
+      "description": "Shows the Markdown files Claude edits, rendered like GitHub, in a pane next to the chat. Before and after side by side. /md opens it."
+    },
+    {
+      "name": "merge-gate",
+      "source": "./merge-gate",
+      "description": "Holds `gh pr merge` until CI passes and one Codex review (OpenAI's luna model) has run. A PR line above the prompt, and /gate shows the PR's status."
+    },
+    {
+      "name": "mission-control",
+      "source": "./mission-control",
+      "description": "/mission opens a live map of the main agent, its subagents and every tool call, plus a code map of the files they touch."
+    },
+    {
+      "name": "next-steps",
+      "source": "./next-steps",
+      "description": "After each turn, 2 or 3 likely next prompts above the prompt. Press 1, 2 or 3 in an empty prompt to draft one, 0 to dismiss."
+    },
+    {
+      "name": "now-playing",
+      "source": "./now-playing",
+      "description": "What Spotify is playing, one line above the prompt: track, progress and the lyric being sung, with ⏮ ⏸ ⏭ buttons. /music controls it too. macOS."
+    },
+    {
+      "name": "openai-balance",
+      "source": "./openai-balance",
+      "description": "Your OpenAI API credit above the prompt: an estimated balance with a gauge, today's spend, where the money mostly went, and the last call. /openai-balance shows the breakdown."
+    },
+    {
+      "name": "openrouter-balance",
+      "source": "./openrouter-balance",
+      "description": "Your OpenRouter credit above the prompt: the balance with a gauge, today's spend and where the money mostly went. /openrouter-balance shows the breakdown."
+    },
+    {
+      "name": "prayer-times",
+      "source": "./prayer-times",
+      "description": "The current prayer and how long is left, the next prayer, and zawal, above the prompt. Computed on your computer from your location; nothing is sent anywhere."
+    },
+    {
+      "name": "reels",
+      "source": "./reels",
+      "description": "YouTube Shorts in a terminal pane: plays while Claude works, pauses when Claude is done."
+    },
+    {
+      "name": "review-watch",
+      "source": "./review-watch",
+      "description": "A live line above the prompt for each running code review: Codex or a review subagent, its model, what it reviews, time, and Codex's latest output. A toast with the findings when it ends."
+    },
+    {
+      "name": "rulebook-guard",
+      "source": "./rulebook-guard",
+      "description": "Writing and git rules: replaces em dashes in prose, and asks before git commit --amend, an unformatted push, or personal info in notes and commits."
+    },
+    {
+      "name": "session-saver",
+      "source": "./session-saver",
+      "description": "Names untitled sessions through unpause. /park saves where you left off, and a resumed session shows it."
+    },
+    {
+      "name": "snake",
+      "source": "./snake",
+      "description": "Snake in a pane while Claude works, paused when it's done. Opt-in, so nothing opens until /snake."
+    },
+    {
+      "name": "switchboard",
+      "source": "./switchboard",
+      "description": "Picks the model for each subagent that names none, with OpenAI's Decisions API or Jev, from its short label only. One line per spawn above the prompt; /route shows each pick and what each subagent cost."
+    },
+    {
+      "name": "usage-meter",
+      "source": "./usage-meter",
+      "description": "Your plan's 5-hour and 7-day usage as small bars above the prompt, with the reset countdown and the session's cost."
+    },
+    {
+      "name": "where-am-i",
+      "source": "./where-am-i",
+      "description": "A live recap above the prompt: goal, doing now, waiting on you, next. /where for a longer one."
     }
   ]
 }

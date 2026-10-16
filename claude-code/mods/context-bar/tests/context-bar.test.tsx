@@ -1,6 +1,6 @@
 import { describe, expect, test } from 'claude-code/testing'
 
-import { cells, legend, resetBandOrder, share, toReading, tokens } from '../hooks/register'
+import { cells, legend, resetBandOrder, share, shortenPath, toReading, tokens } from '../hooks/register'
 
 const BAND = { component: 'AbovePrompt', props: { hasSurvey: false, isWorking: false, maxRows: 20, bodyColumns: 84 } }
 
@@ -180,6 +180,32 @@ describe('context-bar', () => {
     await settle()
     const band = await $.ui.mount({ plugin: 'context-bar', surface: 'terminal', ...BAND } as any)
     expect(await band.find({ type: 'Text', text: /of 1M/ })).toBeUndefined()
+    await band.unmount()
+  })
+
+  test('shortenPath writes the home folder as ~', () => {
+    expect(shortenPath('/root', '/root')).toBe('~')
+    expect(shortenPath('/root/a/b', '/root')).toBe('~/a/b')
+    expect(shortenPath('/rootfs/a', '/root')).toBe('/rootfs/a')
+    expect(shortenPath('/mnt/x', undefined)).toBe('/mnt/x')
+    expect(shortenPath('/mnt/x', '/')).toBe('/mnt/x')
+  })
+
+  test('the info row shows folder, branch, model and effort from the engine', async ($, on) => {
+    engine(on)
+    on('session.model', () => ({ value: 'claude-opus-5-5' }))
+    on('settings.read', () => ({ value: { effortLevel: 'xhigh' } }))
+    on('session.cwd', () => ({ value: '/home/me/work/proj' }))
+    on('process.run', (_$: any, e: any) => ({
+      value: { exitCode: e.argv[1] === 'symbolic-ref' ? 0 : 128, stdout: 'feat/band\n', stderr: '', isStdoutTruncated: false, isStderrTruncated: false },
+    }))
+    await $.session.start({ cwd: '/tmp', surface: 'terminal', isInteractive: true } as any)
+    await settle()
+    const band = await $.ui.mount({ plugin: 'context-bar', surface: 'terminal', ...BAND } as any)
+    expect(await band.find({ type: 'Text', text: '~/work/proj' })).toBeDefined()
+    expect(await band.find({ type: 'Text', text: 'feat/band' })).toBeDefined()
+    expect(await band.find({ type: 'Text', text: 'claude-opus-5-5' })).toBeDefined()
+    expect(await band.find({ type: 'Text', text: 'effort: xhigh' })).toBeDefined()
     await band.unmount()
   })
 })
