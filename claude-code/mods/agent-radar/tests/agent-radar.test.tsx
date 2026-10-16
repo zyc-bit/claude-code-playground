@@ -141,24 +141,22 @@ describe('agent-radar', () => {
     await ui.unmount()
   })
 
-  test('past a pageful of agents the grid turns pages, nothing folded away', async ($, on) => {
+  test('past a pageful of agents the grid turns pages along the timeline', async ($, on) => {
     engine(on, {}, undefined, ['a1', 'a2', 'a3', 'a4', 'a5', 'a6', 'a7', 'a8', 'a9', 'a10', 'a11', 'a12'])
     await $.session.start({ surface: 'terminal', isInteractive: true, cwd: '/work' } as any)
     for (let i = 0; i < 12; i++) await $.agent.spawn({ prompt: 'p', description: `unit ${i + 1}` } as any)
     await $.command.run({ command: 'radar', args: '' } as any)
     const ui = await $.ui.mount({ plugin: 'agent-radar', surface: 'terminal', ...PANE } as any) // 30 rows: three rows of cards a page
     expect(cardRows(await ui.drawn()).map(r => r.children.length)).toEqual([2, 2, 2]) // one pageful
-    expect(await ui.find({ key: 'agent-a12' })).toBeDefined() // newest first
-    expect(await ui.find({ key: 'agent-a6' })).toBeUndefined() // on the next page, not folded away
+    expect(await ui.find({ key: 'agent-a1' })).toBeDefined() // first spawned at the head
+    expect(await ui.find({ key: 'agent-a7' })).toBeUndefined() // on the next page, not folded away
     expect(await ui.find({ type: 'Text', text: /1\/2/ })).toBeDefined()
+    const first: any = await ui.find({ key: 'agent-a1' })
+    expect(first?.props?.hotkey ?? first?.hotkey).toBe('1') // the digits count within the page
     await ui.press({ key: 'newer' })
-    expect(await ui.find({ key: 'agent-a3' })).toBeDefined()
-    const tenth: any = await ui.find({ key: 'agent-a3' })
-    expect(tenth?.props?.hotkey ?? tenth?.hotkey).toBe('0') // the tenth key on the row of digits
-    const last: any = await ui.find({ key: 'agent-a1' })
-    expect(last?.props?.hotkey ?? last?.hotkey).toBeUndefined() // no digit left for it: Tab reaches it
+    expect(await ui.find({ key: 'agent-a12' })).toBeDefined() // the newest joins at the far end
     await ui.press({ key: 'older' })
-    expect(await ui.find({ key: 'agent-a12' })).toBeDefined() // back to the newest page
+    expect(await ui.find({ key: 'agent-a1' })).toBeDefined() // back along the timeline
     await ui.unmount()
   })
 

@@ -67,7 +67,8 @@ export const register: Register = on => {
     if (r.agentId) {
       const id = r.agentId
       const one: RadarAgent = { id, description: e.description || e.name || e.subagentType, type: e.subagentType, status: 'running', startedAt: Date.now(), tools: 0, last: 'starting' }
-      await update($, agents, list => [one, ...list.filter(a => a.id !== id)].slice(0, 30))
+      // The list is a timeline: each agent joins at the end, the oldest falls off past thirty.
+      await update($, agents, list => [...list.filter(a => a.id !== id), one].slice(-30))
     }
     return r
   })
@@ -270,9 +271,10 @@ export const register: Register = on => {
       )
     }
 
-    // The grid: a card per agent, as many a row as fit (up to three), the newest first,
-    // a pageful of rows at a time. The pane's own scroll window never moves, so the
-    // buttons stay at the head and the crab at the foot of every page.
+    // The grid: a card per agent, as many a row as fit (up to three), along the timeline —
+    // the first spawned at the head, the newest at the far end, a pageful of rows at a
+    // time. The pane's own scroll window never moves, so the buttons stay at the head and
+    // the crab at the foot of every page.
     const running = list.filter(a => a.status === 'running').length
     const cols = Math.max(1, Math.min(3, Math.floor(width / CARD_MIN)))
     const cardWidth = Math.floor((width - (cols - 1)) / cols) // one cell of gap between cards
@@ -304,7 +306,7 @@ export const register: Register = on => {
         {list.length === 0 && <Text dimColor>No subagents yet this session.</Text>}
         {rows.slice(pg * per, pg * per + per).map((row, r) => (
           <Box flexDirection="row" gap={1}>
-            {row.map((a, c) => card(a, (pg * per + r) * cols + c))}
+            {row.map((a, c) => card(a, r * cols + c))}
           </Box>
         ))}
       </Box>,
