@@ -115,6 +115,15 @@ test('background work left by a turn keeps the crab from resting', () => {
   ).toEqual({ activity: 'waiting', detail: '2 tasks in the background' })
 })
 
+test('a background task at rest is no work in the background', () => {
+  const idle = { type: 'teammate', description: 'Count the scenes', status: 'idle' }
+  expect(sceneOfLingering([idle])).toBe(undefined) // an agent that finished and waits
+  expect(sceneOfLingering([idle, { type: 'shell', description: 'Build', command: 'make build', status: 'running' }])).toEqual({
+    activity: 'waiting',
+    detail: 'make build',
+  })
+})
+
 test('an artifact that is only being watched lets the crab rest', () => {
   const watch = { type: 'monitor', description: 'live updates for artifact https://claude.ai/artifact/abc' }
 

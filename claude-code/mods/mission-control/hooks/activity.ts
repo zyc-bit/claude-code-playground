@@ -379,8 +379,9 @@ export function helpersLine(helpers: readonly Helper[]): string {
   return `${helpers.length} helpers: ${doing.join(', ')}`
 }
 
-// A task still running in the background once the turn is over.
-export type Lingering = { type: string; description: string; command?: string }
+// A task still running in the background once the turn is over. `status` as
+// the engine reports it: an agent that finished and waits is no work.
+export type Lingering = { type: string; description: string; command?: string; status?: string }
 
 // A subscription that stays open for as long as the session does, such as the
 // live updates of a published artifact. Nothing is in progress, so it must not
@@ -389,11 +390,16 @@ function isStanding(task: Lingering): boolean {
   return /^live updates for /i.test(task.description)
 }
 
+// A task at rest — an agent that finished and waits — is no work in the
+// background; only one still on its way or running keeps the crab from
+// resting. A task the report carries no status for is taken to be running.
+const isAtRest = (task: Lingering) => task.status !== undefined && task.status !== 'running' && task.status !== 'pending' && task.status !== 'queued'
+
 // What the crab shows once a turn is over while work goes on in the
 // background: helpers at work when every task is a subagent or a workflow,
 // waiting otherwise; nothing when no task is left, and the crab may rest.
 export function sceneOfLingering(all: readonly Lingering[]): { activity: Activity; detail: string } | undefined {
-  const tasks = all.filter(task => !isStanding(task))
+  const tasks = all.filter(task => !isStanding(task) && !isAtRest(task))
   const [first] = tasks
 
   if (first === undefined) {
