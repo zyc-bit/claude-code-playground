@@ -1,4 +1,4 @@
-import { describe, expect, test } from 'claude-code/testing'
+import { describe, expect, mock, test } from 'claude-code/testing'
 
 import { chunk, describe as label, elapsed, isShown, oneLine, resetBandOrder } from '../hooks/register'
 
@@ -7,8 +7,12 @@ const PANE = { component: 'Pane', requestId: 'agent-radar', props: { title: 'Age
 
 const SWEEP = [{ role: 'user', text: 'Run the sweep', toolUses: [] }, { role: 'assistant', text: 'Sweep is at trial 12 of 40.', toolUses: [] }]
 
-// Stands for the engine beneath the mod. Spawns answer the `ids` in turn; `messages` answers each agent's conversation.
-function engine(on: any, files: Record<string, string> = {}, beneath?: unknown, ids = ['a1'], messages: (agentId: string) => unknown[] = () => SWEEP) {
+// What mission-control holds for the crab: its scene, and whether /mission crab hid it. The radar only reads them.
+type Mission = { scene?: unknown; hidden?: boolean }
+
+// Stands for the engine beneath the mod. Spawns answer the `ids` in turn; `messages` answers each agent's conversation;
+// `mission` is what mission-control holds, and `isClocked` gives the mod a clock the test can move.
+function engine(on: any, files: Record<string, string> = {}, beneath?: unknown, ids = ['a1'], messages: (agentId: string) => unknown[] = () => SWEEP, mission: Mission = {}, isClocked = false) {
   const toasts: string[] = []
   let spawned = 0
   resetBandOrder()
@@ -17,16 +21,19 @@ function engine(on: any, files: Record<string, string> = {}, beneath?: unknown, 
   on('fs.read', (_$: any, e: any) => ({ value: files[e.path] ?? '' }))
   on('session.start', (_$: any, e: any) => ({ sessionId: 's', cwd: e.cwd }))
   on('command.register', () => ({ value: undefined }))
-  on('clock.every', () => ({ value: { cancel: () => {} } }))
+  const clock = isClocked ? mock.clock(on) : (on('clock.every', () => ({ value: { cancel: () => {} } })), undefined)
+  // Another mod's values: only its two keys are answered, the mod's own go to the kit.
+  on('state.get', { plugin: 'mission-control', key: 'scene' }, () => ({ value: { value: mission.scene, version: mission.scene === undefined ? 0 : 1 } }))
+  on('state.get', { plugin: 'mission-control', key: 'isCrabHidden' }, () => ({ value: { value: mission.hidden, version: mission.hidden === undefined ? 0 : 1 } }))
   on('agent.spawn', () => ({ model: 'sonnet', agentId: ids[spawned++ % ids.length] }))
   on('agent.list', () => ({ value: [] }))
   on('turn.complete', () => ({ text: '' }))
   on('ui.open', () => ({ value: { isPlaced: true } }))
-  on('ui.panes', () => ({ value: [] }))
+  on('ui.panes', () => ({ value: [{ id: 'agent-radar', title: 'Agent Radar', isShown: true, isFocused: true, isPlaced: true }] }))
   on('ui.toast', (_$: any, e: any) => (toasts.push(e.text), { value: undefined }))
   on('ui.render', ($: any, e: any) => beneath ?? $.ui.resolve(e).Text({ children: 'band below' }))
   on('session.messages', (_$: any, e: any) => ({ value: messages(e.agentId) }))
-  return { toasts }
+  return { toasts, clock }
 }
 
 // The grid's rows: Boxes in a row whose children are all bordered cards.
@@ -146,6 +153,69 @@ describe('agent-radar', () => {
     expect(await ui.find({ key: 'view' })).toBeDefined()
     expect(await ui.find({ key: 'stop' })).toBeUndefined()
     await ui.unmount()
+  })
+
+  test("mission-control's crab sits at the foot of the grid and of an agent page, and moves on this pane's own tick", async ($, on) => {
+    const mission: Mission = { scene: { activity: 'reading', detail: 'src/pages/login.tsx' } }
+    const { clock } = engine(on, {}, undefined, ['a1'], () => SWEEP, mission, true)
+    await $.session.start({ surface: 'terminal', isInteractive: true, cwd: '/work' } as any)
+    await $.agent.spawn({ prompt: 'run it', description: 'sweep runner' } as any)
+    await $.command.run({ command: 'radar', args: '' } as any)
+    const ui = await $.ui.mount({ plugin: 'agent-radar', surface: 'terminal', ...PANE, props: { ...PANE.props, scroll: { offset: 0, bodyRows: 30 } } } as any)
+
+    // the grid: its scene's words and detail, the crab in the middle of its field
+    expect(await ui.find({ type: 'Text', text: /^Claude is reading/ })).toBeDefined()
+    expect(await ui.find({ type: 'Text', text: 'src/pages/login.tsx' })).toBeDefined()
+    expect(await ui.find({ type: 'Text', text: '  ▐▛███▜▌  ' })).toBeDefined()
+    expect(await ui.find({ key: 'agent-a1' })).toBeDefined() // the page is still there
+    // the column is as tall as the body, and the spacer before the crab pushes it to the foot
+    const root: any = await ui.drawn()
+    expect(root.props.minHeight).toBe(30)
+    const kids = (root.children as any[]).filter(c => c !== false && c != null)
+    expect(kids.map(c => c.props?.flexGrow)).toEqual([undefined, 1, undefined, undefined]) // page, spacer, blank row, crab
+    expect(kids[0].props.flexDirection).toBe('column')
+
+    // an agent's page has it too
+    await ui.press({ key: 'agent-a1' })
+    expect(await ui.find({ type: 'Text', text: /Sweep is at trial 12 of 40/ })).toBeDefined()
+    expect(await ui.find({ type: 'Text', text: /^Claude is reading/ })).toBeDefined()
+    await ui.press({ key: 'back' })
+
+    // the radar ticks its own crab while its pane is up (the next frame: legs swapped, shifted a cell)
+    await clock!.advance(600)
+    expect(await ui.find({ type: 'Text', text: '   ▐▛███▜▌ ' })).toBeDefined()
+    expect(await ui.find({ type: 'Text', text: '  ▐▛███▜▌  ' })).toBeUndefined()
+    await ui.unmount()
+  })
+
+  test('no crab without mission-control, or after /mission crab hid it; an unknown scene still draws', async ($, on) => {
+    const mission: Mission = {}
+    engine(on, {}, undefined, ['a1'], () => SWEEP, mission)
+    await $.session.start({ surface: 'terminal', isInteractive: true, cwd: '/work' } as any)
+    await $.agent.spawn({ prompt: 'run it', description: 'sweep runner' } as any)
+    await $.command.run({ command: 'radar', args: '' } as any)
+    const draw = async () => {
+      const ui = await $.ui.mount({ plugin: 'agent-radar', surface: 'terminal', ...PANE } as any)
+      const root: any = await ui.drawn()
+      const crab = await ui.find({ type: 'Text', text: /▐/ })
+      await ui.unmount()
+      return { root, crab }
+    }
+    // mission-control is off: nothing was ever written under its name
+    let seen = await draw()
+    expect(seen.crab).toBeUndefined()
+    expect(seen.root.props.minHeight).toBeUndefined()
+    // it is on, but the crab is hidden
+    mission.scene = { activity: 'coding', detail: 'x' }
+    mission.hidden = true
+    seen = await draw()
+    expect(seen.crab).toBeUndefined()
+    // shown again, with a scene this copy does not know: the name stands in for the words, no prop
+    mission.hidden = false
+    mission.scene = { activity: 'levitating', detail: '' }
+    seen = await draw()
+    expect(seen.crab).toBeDefined()
+    expect(seen.root.props.minHeight).toBe(30)
   })
 
   test('follows the band order file', async ($, on) => {

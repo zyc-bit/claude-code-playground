@@ -5,11 +5,14 @@
 //   three a row when the pane is wide). A number opens that agent: its whole conversation,
 //   a button that puts its transcript in the main view (the prompt then talks to it) and
 //   one that asks it to stop. No call stops a subagent outright, so that is a message.
+//   With mission-control on, its crab sits at the foot of this pane too, so it stays when
+//   the pane's tab is switched: the scene is read from mission-control, the crab drawn here.
 import { atom, read, update } from 'claude-code'
-import type { EngineInterface, Register } from 'claude-code'
+import type { EngineInterface, Register, RenderElement } from 'claude-code'
 
-import type { RadarAgent } from '../types'
+import type { RadarAgent, Scene } from '../types'
 import { bandsFile, parseOrder, stackBands } from './bands'
+import { CRAB_WIDTH, LABELS, sceneRows } from './crab'
 
 const PANE = 'agent-radar'
 const SHOW_DONE_MS = 30_000 // a finished agent stays in the band this long
@@ -17,12 +20,20 @@ const BAND_ROWS = 4
 const CARD_MIN = 40 // a grid column is at least this wide
 const MAX_MESSAGES = 200 // an agent's page shows its last this many messages
 const STOP_TEXT = 'Please stop: finish the step you are on, start nothing new, and reply with what you have so far.'
+const TICK_MS = 600 // the crab's animation, as in mission-control
+const ONE_LINE = 60 // a crab detail up to this long is taken to fit on one line
+
+// The crab's scene, and whether /mission crab hid it, are mission-control's: any mod may read them,
+// only it writes them. They are not in this mod's contract, so the refs are cast where read.
+const missionScene = { plugin: 'mission-control', key: 'scene' } as const
+const missionHidden = { plugin: 'mission-control', key: 'isCrabHidden' } as const
 
 // Held by the host, so the radar survives a hot reload of this file.
 const agents = atom({ plugin: 'agent-radar', key: 'agents' } as const, [] as RadarAgent[])
 const selected = atom({ plugin: 'agent-radar', key: 'selected' } as const, null as string | null)
 const now = atom({ plugin: 'agent-radar', key: 'now' } as const, 0)
 const notice = atom({ plugin: 'agent-radar', key: 'notice' } as const, null as string | null) // what the last button press came to
+const crabTick = atom({ plugin: 'agent-radar', key: 'crabTick' } as const, 0) // the crab's animation, ticking only while this pane is up
 
 let bandOrder: Promise<string[]> | undefined // read once per session: restart to apply
 
@@ -35,6 +46,12 @@ export const register: Register = on => {
       void (async () => {
         // A few seconds past the 30 s too, so the redraw that drops a finished line happens.
         if ((await read($, agents)).some(a => isShown(a, Date.now() - 3_000))) await update($, now, () => Date.now())
+      })().catch(() => {})
+    })
+    // The crab's tick, only while the pane is up, so nothing animates unseen.
+    $.clock.every(TICK_MS, () => {
+      void (async () => {
+        if ((await $.ui.panes()).some(p => p.id === PANE && p.isPlaced)) await update($, crabTick, tick => (tick + 1) % 60)
       })().catch(() => {})
     })
     return r
@@ -137,12 +154,53 @@ export const register: Register = on => {
       }} />
     )
 
+    // mission-control's crab at the foot of either page. With it the column is as tall as the body and
+    // the spacer takes what the page leaves, so the crab sits at the foot. Nothing without a scene
+    // (mission-control is off) or after /mission crab hid it.
+    const scene = (await read($, missionScene as never)) as Scene | undefined
+    const isCrabHidden = (await read($, missionHidden as never)) === true
+    const tick = await read($, crabTick)
+    const bodyRows = e.props.scroll?.bodyRows ?? 30
+    const withCrab = (page: RenderElement) => {
+      if (scene === undefined || isCrabHidden) return page
+      const detail = scene.detail ?? ''
+      const crab = sceneRows(scene.activity, tick)
+      return (
+        <Box flexDirection="column" minHeight={bodyRows}>
+          {page}
+          <Box flexGrow={1} />
+          <Text>{' '}</Text>
+          <Box flexDirection="row" gap={2} flexShrink={0}>
+            <Box flexDirection="column" flexShrink={0} width={CRAB_WIDTH}>
+              {crab.crab.map(row => (
+                <Text color="claude">{row}</Text>
+              ))}
+            </Box>
+            <Box flexDirection="column" flexShrink={0}>
+              {crab.prop.map(row => (
+                <Text dimColor>{row === '' ? ' ' : row}</Text>
+              ))}
+            </Box>
+            <Box flexDirection="column" flexGrow={1} minWidth={0}>
+              <Text> </Text>
+              <Text bold wrap="truncate-end">
+                {LABELS[scene.activity] ?? scene.activity}
+              </Text>
+              <Text dimColor wrap={detail.length <= ONE_LINE ? 'truncate-end' : 'wrap'}>
+                {detail === '' ? ' ' : detail}
+              </Text>
+            </Box>
+          </Box>
+        </Box>
+      )
+    }
+
     if (one) {
       const found = await $.session.messages({ agentId: one.id })
       const all = 'deny' in found ? [] : found
       const messages = all.slice(-MAX_MESSAGES)
       const note = await read($, notice)
-      return (
+      return withCrab(
         <Box flexDirection="column">
           <Text>
             <Text color={color(one)} bold>{`${icon(one)} ${one.description}`}</Text>
@@ -189,7 +247,7 @@ export const register: Register = on => {
               </Box>
             )
           })}
-        </Box>
+        </Box>,
       )
     }
 
@@ -205,7 +263,7 @@ export const register: Register = on => {
         {a.said && <Text dimColor wrap="truncate-end">{`“${a.said}”`}</Text>}
       </Box>
     )
-    return (
+    return withCrab(
       <Box flexDirection="column">
         <Text bold>{`${running} running · ${list.length - running} finished`}</Text>
         {list.length === 0 && <Text dimColor>No subagents yet this session.</Text>}
@@ -220,7 +278,7 @@ export const register: Register = on => {
           {toMain}
           <Button key="close" label="Close" hotkey="q" role="dismiss" onPress={() => $.ui.close({ id: PANE })} />
         </Box>
-      </Box>
+      </Box>,
     )
   })
 }
