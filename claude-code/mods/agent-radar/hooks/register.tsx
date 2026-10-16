@@ -259,7 +259,7 @@ export const register: Register = on => {
     const cardWidth = Math.floor((width - (cols - 1)) / cols) // one cell of gap between cards
     const card = (a: RadarAgent, i: number) => (
       <Box flexDirection="column" width={cardWidth} borderStyle="round" borderColor={a.id === inView ? 'cyan' : 'inactive'} paddingX={1}>
-        <Button key={`agent-${a.id}`} plain hotkey={i < 9 ? String(i + 1) : undefined} dimColor={a.status !== 'running'} label={`${icon(a)} ${a.description}`} onPress={choose(a.id)} />
+        <Button key={`agent-${a.id}`} plain hotkey={i < 9 ? String(i + 1) : i === 9 ? '0' : undefined} dimColor={a.status !== 'running'} label={`${icon(a)} ${a.description}`} onPress={choose(a.id)} />
         <Text dimColor wrap="truncate-end">{`${a.type} · ${elapsed(a)} · ${a.tools} tools`}</Text>
         <Text color={color(a)} wrap="truncate-end">{a.status === 'done' ? 'finished' : a.last}</Text>
         {a.said && <Text dimColor wrap="truncate-end">{`“${a.said}”`}</Text>}
@@ -267,7 +267,7 @@ export const register: Register = on => {
     )
     return withCrab(
       <Box flexDirection="column">
-        <Text bold>{`${running} running · ${list.length - running} finished`}</Text>
+        <Text bold>{`${running} running · ${list.length - running} finished${Math.ceil(list.length / cols) * 6 > bodyRows ? ' · ↑↓ scroll' : ''}`}</Text>
         {list.length === 0 && <Text dimColor>No subagents yet this session.</Text>}
         {chunk(list, cols).map((row, r) => (
           <Box flexDirection="row" gap={1}>

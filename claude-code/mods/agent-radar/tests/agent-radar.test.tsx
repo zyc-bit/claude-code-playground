@@ -141,6 +141,22 @@ describe('agent-radar', () => {
     await ui.unmount()
   })
 
+  test('past nine agents every card is drawn, for the pane to scroll', async ($, on) => {
+    engine(on, {}, undefined, ['a1', 'a2', 'a3', 'a4', 'a5', 'a6', 'a7', 'a8', 'a9', 'a10', 'a11', 'a12'])
+    await $.session.start({ surface: 'terminal', isInteractive: true, cwd: '/work' } as any)
+    for (let i = 0; i < 12; i++) await $.agent.spawn({ prompt: 'p', description: `unit ${i + 1}` } as any)
+    await $.command.run({ command: 'radar', args: '' } as any)
+    const ui = await $.ui.mount({ plugin: 'agent-radar', surface: 'terminal', ...PANE } as any)
+    expect(cardRows(await ui.drawn()).map(r => r.children.length)).toEqual([2, 2, 2, 2, 2, 2]) // all twelve, two a row
+    expect(await ui.find({ type: 'Text', text: /older/ })).toBeUndefined() // nothing folded away
+    expect(await ui.find({ type: 'Text', text: /↑↓ scroll/ })).toBeDefined() // taller than the pane
+    const tenth: any = await ui.find({ key: 'agent-a3' }) // newest first: the tenth card is a3
+    expect(tenth?.props?.hotkey ?? tenth?.hotkey).toBe('0') // the tenth key on the row of digits
+    const last: any = await ui.find({ key: 'agent-a1' }) // the twelfth card, last spawned
+    expect(last?.props?.hotkey ?? last?.hotkey).toBeUndefined() // no digit left for it: Tab reaches it
+    await ui.unmount()
+  })
+
   test('a narrow pane draws one card a row, and a finished agent has no stop button', async ($, on) => {
     engine(on)
     await $.session.start({ surface: 'terminal', isInteractive: true, cwd: '/work' } as any)
