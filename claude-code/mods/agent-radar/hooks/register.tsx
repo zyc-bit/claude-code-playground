@@ -126,7 +126,7 @@ export const register: Register = on => {
     const { Box, Text } = $.ui.resolve(e)
     const mine = (
       <Box flexDirection="column">
-        {shown.slice(0, BAND_ROWS).map(a => (
+        {shown.slice(-BAND_ROWS).map(a => ( // the timeline's end: the latest at work, not its oldest
           <Text wrap="truncate-end">
             <Text color={color(a)} bold>{` ${icon(a)} ${a.description}`}</Text>
             <Text dimColor>{`  ${elapsed(a)} · ${a.tools} tools`}</Text>

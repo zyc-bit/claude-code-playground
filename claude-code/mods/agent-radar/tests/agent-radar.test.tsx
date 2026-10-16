@@ -141,6 +141,18 @@ describe('agent-radar', () => {
     await ui.unmount()
   })
 
+  test('the band shows the latest agents at work, along the timeline', async ($, on) => {
+    engine(on, {}, undefined, ['a1', 'a2', 'a3', 'a4', 'a5'])
+    await $.session.start({ surface: 'terminal', isInteractive: true, cwd: '/work' } as any)
+    for (let i = 0; i < 5; i++) await $.agent.spawn({ prompt: 'p', description: `unit ${i + 1}` } as any)
+    const band = await $.ui.mount({ plugin: 'agent-radar', surface: 'terminal', ...BAND } as any)
+    expect(await band.find({ type: 'Text', text: /● unit 5/ })).toBeDefined() // the newest at work
+    expect(await band.find({ type: 'Text', text: /● unit 2/ })).toBeDefined() // back to it
+    expect(await band.find({ type: 'Text', text: /● unit 1/ })).toBeUndefined() // folded away, one row over
+    expect(await band.find({ type: 'Text', text: /\+1 more · \/radar/ })).toBeDefined()
+    await band.unmount()
+  })
+
   test('past a pageful of agents the grid turns pages along the timeline', async ($, on) => {
     engine(on, {}, undefined, ['a1', 'a2', 'a3', 'a4', 'a5', 'a6', 'a7', 'a8', 'a9', 'a10', 'a11', 'a12'])
     await $.session.start({ surface: 'terminal', isInteractive: true, cwd: '/work' } as any)
