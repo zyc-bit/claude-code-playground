@@ -28,3 +28,9 @@ claude plugin install token-weather@claude-code-playground-mods --scope user
 ```
 
 See the [Claude Code plugins documentation](https://code.claude.com/docs/en/plugins) for how plugins and marketplaces work, and for how to review a plugin before you install it.
+
+## Imported from claude-code-mods
+
+The other 22 folders here are copied unmodified from [hamzafer/claude-code-mods](https://github.com/hamzafer/claude-code-mods) by Hamza Zafar, under the MIT License (see the `LICENSE` file in each folder). They are not written by Anthropic, have no README of their own and have not been through `_template/PREFLIGHT.md`. Try one with `claude --plugin-dir ./<name>`; read the code before you install it.
+
+agent-radar, browser-lanes, cache-clock, context-bar, glance, heatmap, md-preview, merge-gate, mission-control, next-steps, now-playing, openai-balance, openrouter-balance, prayer-times, reels, review-watch, rulebook-guard, session-saver, snake, switchboard, usage-meter, where-am-i
