@@ -40,7 +40,7 @@
     {
       "name": "context-bar",
       "source": "./context-bar",
-      "description": "Your context window as a stacked bar above the prompt, a color per category, with token counts and the compaction point, plus one row with folder, git branch, model and effort. /context-bar shows or hides it."
+      "description": "Your context window as a stacked bar above the prompt, a color per category, with token counts and the compaction point, plus one row with folder, git branch with its unpushed commits and the working tree's changes, model and effort. /context-bar shows or hides it."
     },
     {
       "name": "glance",

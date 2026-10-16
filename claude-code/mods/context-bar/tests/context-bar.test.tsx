@@ -1,6 +1,6 @@
 import { describe, expect, test } from 'claude-code/testing'
 
-import { cells, legend, resetBandOrder, share, shortenPath, toReading, tokens } from '../hooks/register'
+import { cells, legend, parseStatus, resetBandOrder, share, shortenPath, toReading, tokens } from '../hooks/register'
 
 const BAND = { component: 'AbovePrompt', props: { hasSurvey: false, isWorking: false, maxRows: 20, bodyColumns: 84 } }
 
@@ -206,6 +206,71 @@ describe('context-bar', () => {
     expect(await band.find({ type: 'Text', text: 'feat/band' })).toBeDefined()
     expect(await band.find({ type: 'Text', text: 'claude-opus-5-5' })).toBeDefined()
     expect(await band.find({ type: 'Text', text: 'effort: xhigh' })).toBeDefined()
+    await band.unmount()
+  })
+
+  test('parseStatus counts the working tree by state and the unpushed commits', () => {
+    expect(parseStatus('')).toEqual({ staged: 0, unstaged: 0, untracked: 0, ahead: 0 })
+    expect(
+      parseStatus(
+        [
+          '## add-community-mods...myfork/add-community-mods [ahead 2]',
+          'M  hooks/register.tsx',
+          'MM hooks/bands.ts',
+          ' M types/index.d.ts',
+          'D  hooks/old.ts',
+          '?? tests/status.test.ts',
+        ].join('\n'),
+      ),
+    ).toEqual({ staged: 3, unstaged: 2, untracked: 1, ahead: 2 })
+    expect(parseStatus('## main...origin/main [ahead 10, behind 3]\n')).toEqual({ staged: 0, unstaged: 0, untracked: 0, ahead: 10 })
+    expect(parseStatus('## main...origin/main\n')).toEqual({ staged: 0, unstaged: 0, untracked: 0, ahead: 0 })
+    expect(parseStatus('## HEAD (no branch)\n')).toEqual({ staged: 0, unstaged: 0, untracked: 0, ahead: 0 })
+  })
+
+  test('the info row counts the working tree and the unpushed commits', async ($, on) => {
+    engine(on)
+    on('session.model', () => ({ value: 'claude-opus-5-5' }))
+    on('settings.read', () => ({ value: {} }))
+    on('session.cwd', () => ({ value: '/home/me/work/proj' }))
+    on('process.run', (_$: any, e: any) => ({
+      value: {
+        exitCode: 0,
+        stdout:
+          e.argv[1] === 'symbolic-ref'
+            ? 'add-community-mods\n'
+            : '## add-community-mods...myfork/add-community-mods [ahead 2]\nM  hooks/register.tsx\n M types/index.d.ts\n?? notes.md\n',
+        stderr: '', isStdoutTruncated: false, isStderrTruncated: false,
+      },
+    }))
+    await $.session.start({ cwd: '/tmp', surface: 'terminal', isInteractive: true } as any)
+    await settle()
+    const band = await $.ui.mount({ plugin: 'context-bar', surface: 'terminal', ...BAND } as any)
+    expect(await band.find({ type: 'Text', text: 'add-community-mods' })).toBeDefined()
+    expect(await band.find({ type: 'Text', text: '↑2' })).toBeDefined()
+    expect(await band.find({ type: 'Text', text: '+1' })).toBeDefined()
+    expect(await band.find({ type: 'Text', text: '~1' })).toBeDefined()
+    expect(await band.find({ type: 'Text', text: '?1' })).toBeDefined()
+    await band.unmount()
+  })
+
+  test('a clean tree on a pushed branch shows no counts', async ($, on) => {
+    engine(on)
+    on('session.model', () => ({ value: 'claude-opus-5-5' }))
+    on('settings.read', () => ({ value: {} }))
+    on('session.cwd', () => ({ value: '/home/me/work/proj' }))
+    on('process.run', (_$: any, e: any) => ({
+      value: {
+        exitCode: 0,
+        stdout: e.argv[1] === 'symbolic-ref' ? 'main\n' : '## main...origin/main\n',
+        stderr: '', isStdoutTruncated: false, isStderrTruncated: false,
+      },
+    }))
+    await $.session.start({ cwd: '/tmp', surface: 'terminal', isInteractive: true } as any)
+    await settle()
+    const band = await $.ui.mount({ plugin: 'context-bar', surface: 'terminal', ...BAND } as any)
+    expect(await band.find({ type: 'Text', text: 'main' })).toBeDefined()
+    for (const mark of ['↑1', '+1', '~1', '?1']) expect(await band.find({ type: 'Text', text: mark })).toBeUndefined()
     await band.unmount()
   })
 })

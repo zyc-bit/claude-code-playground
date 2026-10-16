@@ -3,13 +3,14 @@
 //   draws them (system prompt, tools, MCP tools, memory files, skills, messages, free),
 //   with a legend of tokens and shares and where auto-compaction runs. It refreshes after
 //   each turn. /context-bar shows or hides it, and the choice is kept across sessions.
-//   Above the bar, one info row: folder, git branch, model and effort (from the
-//   model-effort-band mod). It is read at start, after each turn and after /model, /effort,
-//   /clear, /compact, /fast and /cd, and turn.step keeps the model and effort that were really sent.
+//   Above the bar, one info row: folder, git branch with its unpushed commits and the
+//   working tree's changes, model and effort (from the model-effort-band mod). It is read
+//   at start, after each turn and after /model, /effort, /clear, /compact, /fast and /cd,
+//   and turn.step keeps the model and effort that were really sent.
 import { atom, read, update } from 'claude-code'
 import type { EngineInterface, Register } from 'claude-code'
 
-import type { Effort, Reading, Slice } from '../types'
+import type { Changes, Effort, Reading, Slice } from '../types'
 import { bandsFile, parseOrder, stackBands } from './bands'
 
 const MIN_WIDTH = 20 // narrower than this, the bar is not drawn
@@ -29,6 +30,7 @@ const model = atom({ plugin: 'context-bar', key: 'model' } as const, null as str
 const effort = atom({ plugin: 'context-bar', key: 'effort' } as const, null as Effort | null)
 const cwd = atom({ plugin: 'context-bar', key: 'cwd' } as const, null as string | null)
 const branch = atom({ plugin: 'context-bar', key: 'branch' } as const, null as string | null)
+const changes = atom({ plugin: 'context-bar', key: 'changes' } as const, null as Changes | null)
 
 const EFFORTS = ['low', 'medium', 'high', 'xhigh', 'max']
 // These commands can change the model, effort, folder or branch: read them again once they ran.
@@ -91,6 +93,7 @@ export const register: Register = on => {
     const level = await read($, effort)
     const dir = await read($, cwd)
     const git = await read($, branch)
+    const tree = await read($, changes)
     if (e.props.hasSurvey || (await read($, isHidden)) || (!r && name === null && dir === null && git === null)) return rest
     const { Box, Text } = $.ui.resolve(e)
     const inner = e.props.bodyColumns - 4 // the border and padding take 4 cells
@@ -102,6 +105,17 @@ export const register: Register = on => {
         <Text dimColor>{' · '}</Text>
       </Box>
     )
+    // The working tree's changes, one mark each, colored as git colors them.
+    const marks = tree === null
+      ? []
+      : [
+          tree.staged > 0 ? <Text color="green">{`+${tree.staged}`}</Text> : null,
+          tree.unstaged > 0 ? <Text color="yellow">{`~${tree.unstaged}`}</Text> : null,
+          tree.untracked > 0 ? <Text color="red">{`?${tree.untracked}`}</Text> : null,
+        ].filter(x => x !== null)
+    const gap = (
+      <Text>{' '}</Text>
+    )
     const info = [
       dir === null ? null : (
         <Box flexShrink={1} minWidth={0}>
@@ -111,6 +125,16 @@ export const register: Register = on => {
       git === null ? null : (
         <Box flexShrink={1} minWidth={0}>
           <Text color="green" wrap="truncate">{git}</Text>
+        </Box>
+      ),
+      tree !== null && tree.ahead > 0 ? (
+        <Box flexShrink={0}>
+          <Text color="green">{`↑${tree.ahead}`}</Text>
+        </Box>
+      ) : null,
+      marks.length === 0 ? null : (
+        <Box flexShrink={0}>
+          <Text>{marks.flatMap((m, i) => (i > 0 ? [gap, m] : [m]))}</Text>
         </Box>
       ),
       name === null ? null : (
@@ -193,11 +217,41 @@ export async function readBranch($: EngineInterface): Promise<string | null> {
   }
 }
 
+// What `git status --porcelain -b` reports: the working tree's files by state,
+// and the commits the branch leads its upstream by (0 without one).
+export function parseStatus(out: string): Changes {
+  let staged = 0
+  let unstaged = 0
+  let untracked = 0
+  let ahead = 0
+  for (const line of out.split('\n')) {
+    if (line.startsWith('## ')) ahead = Number(/\[ahead (\d+)/.exec(line)?.[1] ?? 0)
+    else if (line.startsWith('??')) untracked++
+    else {
+      if (line[0] !== undefined && line[0] !== ' ') staged++
+      if (line[1] !== undefined && line[1] !== ' ') unstaged++
+    }
+  }
+  return { staged, unstaged, untracked, ahead }
+}
+
+// The working tree's status; null outside a repository or without git.
+export async function readChanges($: EngineInterface): Promise<Changes | null> {
+  try {
+    const status = await $.process.run(['git', 'status', '--porcelain=v1', '-b'], { timeoutMs: 5000 })
+    return status.exitCode === 0 ? parseStatus(status.stdout) : null
+  } catch {
+    return null
+  }
+}
+
 async function refreshWhere($: EngineInterface) {
   const dir = shortenPath(await $.session.cwd(), await $.env.get('HOME'))
   await update($, cwd, () => dir)
   const name = await readBranch($)
   await update($, branch, () => name)
+  const tree = await readChanges($)
+  await update($, changes, () => tree)
 }
 
 // Before the first request only /model and settings tell the model and effort; after it, turn.step does.

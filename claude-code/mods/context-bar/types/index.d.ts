@@ -10,6 +10,10 @@ export type Reading = {
   compactsAt?: number // where auto-compaction runs, when it is on
 }
 
+// What `git status` reports of the working tree: files staged, changed and
+// untracked, and how many commits the branch leads its upstream by.
+export type Changes = { staged: number; unstaged: number; untracked: number; ahead: number }
+
 declare module 'claude-code' {
   interface PluginState {
     'context-bar': {
@@ -19,6 +23,7 @@ declare module 'claude-code' {
       effort: Effort | null
       cwd: string | null
       branch: string | null
+      changes: Changes | null
     }
   }
 }
