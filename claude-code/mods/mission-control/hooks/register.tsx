@@ -27,7 +27,6 @@ import { bandsFile, parseOrder, stackBands } from './bands'
 
 const PANE = 'mission-control'
 const CHROME = '/Applications/Google Chrome.app/Contents/MacOS/Google Chrome'
-const MAX_NODES = 300
 const MAX_FILES = 14
 const BAND_AFTER_MS = 30_000 // the band stays this long after a turn ends
 // Tools that are Claude Code's own bookkeeping, not work: kept out of the tree.
@@ -67,13 +66,11 @@ const isCrabHidden = atom({ plugin: 'mission-control', key: 'isCrabHidden' } as 
 const draw = { size: { columns: 100, rows: 30 }, pending: false, dirty: false, n: 0, error: '' }
 const changes = new Map<string, string[]>() // path → this turn's edits, for the one-line "why"
 
-// Under the cap, the oldest tool calls go first; main and the agents always stay.
-export function cap(list: MissionNode[]) {
-  if (list.length <= MAX_NODES) return list
-  const tools = list.filter(n => n.kind === 'tool')
-  const room = Math.max(0, MAX_NODES - (list.length - tools.length))
-  const keep = new Set(room === 0 ? [] : tools.slice(-room))
-  return list.filter(n => n.kind !== 'tool' || keep.has(n))
+// The main node of the turn now running: the newest one, as every turn of the
+// session keeps its tree.
+function latestMain(list: readonly MissionNode[]): string {
+  for (let i = list.length - 1; i >= 0; i--) { const n = list[i]; if (n && n.kind === 'main') return n.id }
+  return 'main'
 }
 
 // The first `max` characters, cut at a word.
@@ -378,16 +375,26 @@ export const register: Register = on => {
   })
 
   on('turn.start', async ($, e, next) => {
+    if (e.agentId !== undefined) return next(e) // a subagent's turn is not this tree's to root
     const t = (await read($, turn)) + 1
     await update($, turn, () => t)
     changes.clear()
-    const main: MissionNode = { id: 'main', parent: null, kind: 'main', label: `main · ${words(e.text, 50)}`, family: 'main', status: 'running', start: Date.now() }
-    // A background agent still running from the last turn carries over, with its open calls.
+    // The turn's id is the main node's, so every turn of the session keeps its own tree.
+    const main: MissionNode = { id: e.turnId ?? 'main', parent: null, kind: 'main', label: `main · ${words(e.text, 50)}`, family: 'main', status: 'running', start: Date.now() }
+    // The turns before stay; a background agent still running carries over to the new main
+    // with its open calls, and what a turn left running without its complete closes now.
     await update($, nodes, list => {
-      const agents = list.filter(n => n.kind === 'agent' && n.status === 'running').map(a => ({ ...a, parent: 'main' }))
-      const ids = new Set(agents.map(a => a.id))
-      const open = list.filter(n => n.kind === 'tool' && n.status === 'running' && ids.has(n.parent ?? ''))
-      return [main, ...agents, ...open]
+      const live = new Set(list.filter(n => n.kind === 'agent' && n.status === 'running').map(a => a.id))
+      return [
+        ...list.map(n =>
+          n.kind === 'agent' && live.has(n.id)
+            ? { ...n, parent: main.id }
+            : n.status === 'running' && !live.has(n.parent ?? '')
+              ? { ...n, status: 'done' as const, end: Date.now() }
+              : n,
+        ),
+        main,
+      ]
     })
     // The crab sets out.
     stopTimers()
@@ -404,8 +411,10 @@ export const register: Register = on => {
     const r = await next(e)
     if (r.agentId) {
       const id = r.agentId
-      const agent: MissionNode = { id, parent: e.parentAgentId ?? 'main', kind: 'agent', label: e.description || e.subagentType, family: 'agent', status: 'running', start: Date.now(), doing: 'thinking' }
-      await update($, nodes, list => cap([...list, agent]))
+      await update($, nodes, list => {
+        const agent: MissionNode = { id, parent: e.parentAgentId ?? latestMain(list), kind: 'agent', label: e.description || e.subagentType, family: 'agent', status: 'running', start: Date.now(), doing: 'thinking' }
+        return [...list, agent]
+      })
       void helpersNews($)
     }
     return r
@@ -440,8 +449,9 @@ export const register: Register = on => {
     const activity = activityOf(e.tool, args, isDesigning)
     await update($, nodes, list => {
       // A call from an agent this tree does not know hangs off main rather than nowhere.
-      const parent = e.agentId && list.some(n => n.id === e.agentId) ? e.agentId : 'main'
-      const grown = cap([...list, { id, parent, kind: 'tool', label: text, family, status: 'running', start: Date.now() }])
+      const parent = e.agentId && list.some(n => n.id === e.agentId) ? e.agentId : latestMain(list)
+      const call: MissionNode = { id, parent, kind: 'tool', label: text, family, status: 'running', start: Date.now() }
+      const grown = [...list, call]
       return isDoing && e.agentId !== undefined ? grown.map(n => (n.kind === 'agent' && n.id === e.agentId ? { ...n, doing: activity } : n)) : grown
     })
     const path = typeof args.file_path === 'string' ? args.file_path : undefined
@@ -604,7 +614,7 @@ export const register: Register = on => {
 
   on('turn.complete', async ($, e, next) => {
     const r = await next(e)
-    const id = e.agentId ?? 'main'
+    const id = e.agentId ?? e.turnId ?? 'main'
     const failed = e.reason === 'error' || e.reason === 'aborted'
     const isMain = !e.agentId
     // The main turn ending closes everything it left marked running, so the clock can rest.
@@ -657,7 +667,7 @@ export const register: Register = on => {
 
   // `/clear`, `/resume` and the end of the session: what the crab knew of the
   // conversation is gone with it.
-  on('session.end', ($, e, next) => {
+  on('session.end', async ($, e, next) => {
     stopTimers()
     ticker?.cancel()
     ticker = undefined
@@ -669,6 +679,8 @@ export const register: Register = on => {
     calls.clear()
     asking = undefined
     lingering = []
+    // The conversation is gone; the whole history goes with it.
+    await update($, nodes, () => [])
     paint($, 'idle', '')
 
     return next(e)
@@ -798,7 +810,7 @@ export const register: Register = on => {
   on('ui.render', { component: 'AbovePrompt' }, async ($, e, next) => {
     const rest = await next(e) // what other mods and Claude Code draw here stays
     const list = await read($, nodes)
-    const main = list.find(n => n.kind === 'main')
+    const main = list.filter(n => n.kind === 'main').at(-1)
     const s = summary(list)
     const isRecent = main !== undefined && (main.status === 'running' || Date.now() - (main.end ?? 0) < BAND_AFTER_MS)
     if (e.props.hasSurvey || !isRecent || s.tools + s.agents === 0) return rest
