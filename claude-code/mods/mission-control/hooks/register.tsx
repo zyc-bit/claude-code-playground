@@ -1,14 +1,20 @@
-// Mission Control: /mission opens a pane with two views of the current turn.
-//   who  · the main loop, its subagents and every tool call they make, live
-//   code · a rendered map of the files Claude reads and edits, the imports between
-//          them, a glow on what it touches right now, and one line on each change
-// At the pane's foot a crab acts out what Claude is doing right now, and a band
-// line sums the turn up while Claude works. The crab and its scenes come from
+// Mission Control: /mission opens a pane with three views of the session.
+//   who    · the main loop, its subagents and every tool call they make, live
+//   code   · a rendered map of the files Claude reads and edits, the imports between
+//            them, a glow on what it touches right now, and one line on each change
+//   agents · a grid with one card per subagent (two or three a row when the pane is
+//            wide); a number opens that agent: its whole conversation, a button that
+//            puts its transcript in the main view (the prompt then talks to it) and one
+//            that asks it to stop. No call stops a subagent outright, so that is a message.
+//            /radar opens this view too.
+// At the pane's foot a crab acts out what Claude is doing right now. The band sums
+// the turn up while Claude works, with one live line per running subagent, and a
+// toast says when each subagent finishes. The crab and its scenes come from
 // crab-cam (https://github.com/sTomerG/agent-kit), absorbed under its MIT licence.
 import { atom, read, update } from 'claude-code'
-import type { EngineInterface, Register, Timer } from 'claude-code'
+import type { EngineInterface, Register, RenderNode, Timer } from 'claude-code'
 
-import type { Activity, MapFile, MissionNode, Scene } from '../types'
+import type { Activity, AgentCard, MapFile, MissionNode, Scene } from '../types'
 import {
   activityOf,
   activityOfStreaming,
@@ -20,13 +26,23 @@ import {
   whole,
 } from './activity'
 import type { Helper, Lingering } from './activity'
+import { agentColor, agentIcon, chunk, doingOf, elapsed, isShown, oneLine, wrapCells } from './agents'
 import { CRAB_WIDTH, DEMO, LABELS, sceneRows } from './crab'
 import { importsOf, svg } from './map'
-import { label, lines, summary } from './tree'
+import { label, lines, scrolled, summary } from './tree'
 import { bandsFile, parseOrder, stackBands } from './bands'
 
 const PANE = 'mission-control'
-const CHROME = '/Applications/Google Chrome.app/Contents/MacOS/Google Chrome'
+// A headless Chrome or Chromium to draw the map with: CHROME_PATH wins, then
+// the usual installs, probed again each render so one that appears
+// mid-session is picked up.
+const CHROMES = [
+  '/Applications/Google Chrome.app/Contents/MacOS/Google Chrome',
+  '/usr/bin/google-chrome',
+  '/usr/bin/google-chrome-stable',
+  '/usr/bin/chromium',
+  '/usr/bin/chromium-browser',
+]
 const MAX_FILES = 14
 const BAND_AFTER_MS = 30_000 // the band stays this long after a turn ends
 // Tools that are Claude Code's own bookkeeping, not work: kept out of the tree.
@@ -51,19 +67,41 @@ const ONE_LINE = 60
 // The rows the crab's block takes: a blank line, then three of glyphs.
 const CRAB_FOOT_ROWS = 4
 
+// The agents view and the band's agent lines.
+const MAX_AGENTS = 30 // the cards kept: the oldest falls off past this many
+const BAND_AGENTS = 4 // the band's agent lines, the latest at work
+const CARD_MIN = 40 // a grid column is at least this wide
+const CARD_ROWS = 6 // a row of cards: four lines inside a border
+const MAX_MESSAGES = 200 // an agent's page shows its last this many messages
+const STOP_TEXT = 'Please stop: finish the step you are on, start nothing new, and reply with what you have so far.'
+
 // Held by the host, so a hot reload keeps the picture.
 const nodes = atom({ plugin: 'mission-control', key: 'nodes' } as const, [] as MissionNode[])
 const files = atom({ plugin: 'mission-control', key: 'files' } as const, [] as MapFile[])
-const view = atom({ plugin: 'mission-control', key: 'view' } as const, 'who' as 'who' | 'code')
+const view = atom({ plugin: 'mission-control', key: 'view' } as const, 'who' as 'who' | 'code' | 'agents')
+// Each scrolling view's window: `off` rows hidden above it, `follow` holding it
+// on the newest rows. The engine's own window never moves (the pane draws to
+// its room and no more); the wheel moves these instead, so the tabs and the
+// crab stay where they are.
+const treeScroll = atom({ plugin: 'mission-control', key: 'tree-scroll' } as const, { follow: true, off: 0 })
 const frame = atom({ plugin: 'mission-control', key: 'frame' } as const, null as { file: string; n: number } | null)
 const turn = atom({ plugin: 'mission-control', key: 'turn' } as const, 0)
 const now = atom({ plugin: 'mission-control', key: 'now' } as const, 0)
 const scene = atom({ plugin: 'mission-control', key: 'scene' } as const, { activity: 'idle', detail: '' } as Scene)
 const crabTick = atom({ plugin: 'mission-control', key: 'crabTick' } as const, 0)
 const isCrabHidden = atom({ plugin: 'mission-control', key: 'isCrabHidden' } as const, false)
+// The agents view: its cards, the one opened, what its last button press came to.
+const agents = atom({ plugin: 'mission-control', key: 'agents' } as const, [] as AgentCard[])
+const agentPick = atom({ plugin: 'mission-control', key: 'agentPick' } as const, null as string | null)
+const agentNotice = atom({ plugin: 'mission-control', key: 'agentNotice' } as const, null as string | null)
+const gridScroll = atom({ plugin: 'mission-control', key: 'grid-scroll' } as const, { follow: false, off: 0 }) // in rows of cards, from the first spawned
+const agentScroll = atom({ plugin: 'mission-control', key: 'agent-scroll' } as const, { follow: true, off: 0 }) // in lines of the open agent's conversation
 
 // Drawing bookkeeping; a reload starts it over.
 const draw = { size: { columns: 100, rows: 30 }, pending: false, dirty: false, n: 0, error: '' }
+// The window of the view last drawn, so a scroll between draws moves the right
+// one and clamps: its atom, the rows it holds and shows, and the rows a step is.
+let scrollable: { at: 'tree' | 'grid' | 'agent'; total: number; rows: number; unit: number } | undefined
 const changes = new Map<string, string[]>() // path → this turn's edits, for the one-line "why"
 
 // The main node of the turn now running: the newest one, as every turn of the
@@ -352,13 +390,16 @@ export const register: Register = on => {
     await $.command
       .register({
         name: 'mission',
-        description: 'Open the live map of agents and tool calls; "code" the code map, "crab" the crab at its foot, "demo" every crab scene',
-        argumentHint: '[who|code|crab|demo]',
+        description: 'Open the live map of agents and tool calls; "code" the code map, "agents" a card per subagent, "crab" the crab at its foot, "demo" every crab scene',
+        argumentHint: '[who|code|agents|crab|demo]',
       })
       .catch(() => {})
+    // A name Claude Code already has is refused: start anyway.
+    await $.command.register({ name: 'radar', description: 'Show what each subagent is doing, in the agents view of Mission Control' }).catch(() => {})
     $.clock.every(1000, () => {
       void (async () => {
-        const busy = (await read($, nodes)).some(n => n.status === 'running')
+        // A finished agent's line a few seconds past its 30 s too, so the redraw that drops it happens.
+        const busy = (await read($, nodes)).some(n => n.status === 'running') || (await read($, agents)).some(a => isShown(a, Date.now() - 3_000))
         if (busy) await update($, now, () => Date.now())
       })().catch(() => {})
     })
@@ -415,6 +456,9 @@ export const register: Register = on => {
         const agent: MissionNode = { id, parent: e.parentAgentId ?? latestMain(list), kind: 'agent', label: e.description || e.subagentType, family: 'agent', status: 'running', start: Date.now(), doing: 'thinking' }
         return [...list, agent]
       })
+      // The cards are a timeline: each agent joins at the end, the oldest falls off past thirty.
+      const card: AgentCard = { id, description: e.description || e.name || e.subagentType, type: e.subagentType, status: 'running', startedAt: Date.now(), tools: 0, last: 'starting' }
+      await update($, agents, list => [...list.filter(a => a.id !== id), card].slice(-MAX_AGENTS))
       void helpersNews($)
     }
     return r
@@ -422,6 +466,12 @@ export const register: Register = on => {
 
   on('tool.call', async ($, e, next) => {
     const args = e as unknown as Record<string, unknown>
+    // Every call of a subagent counts on its card, bookkeeping and its own helpers included.
+    if (e.agentId !== undefined) {
+      const owner = e.agentId
+      const doing = doingOf(args)
+      await update($, agents, list => list.map(a => (a.id === owner ? { ...a, tools: a.tools + 1, last: doing } : a)))
+    }
     // The Agent tool's own node is the subagent that agent.spawn adds; the
     // crab still shows the delegation while the call runs.
     if (e.tool === 'Agent') {
@@ -519,8 +569,15 @@ export const register: Register = on => {
   // about seconds before the call is made, and the crab should not sit on a
   // generic scene while they arrive.
   on('turn.step', async function* ($, e, next) {
+    // Each step a subagent's model answers: its latest words go on its card.
     if (e.agentId !== undefined) {
-      return yield* next(e)
+      const r = yield* next(e)
+      const id = e.agentId
+      if (r.answer.trim()) {
+        const said = oneLine(r.answer).slice(0, 500)
+        await update($, agents, list => list.map(a => (a.id === id ? { ...a, said } : a))).catch(() => {})
+      }
+      return r
     }
 
     // A reload in the middle of a turn has no turn.start to go by.
@@ -648,6 +705,12 @@ export const register: Register = on => {
         })
       }
     } else {
+      const agentId = e.agentId
+      const list = await update($, agents, all =>
+        all.map((a): AgentCard => (a.id === agentId ? { ...a, status: failed ? 'failed' : 'done', endedAt: Date.now(), last: failed ? `stopped: ${e.reason}` : 'finished' } : a)),
+      )
+      const one = list.find(a => a.id === agentId)
+      if (one) $.ui.toast(`${failed ? '✗' : '✓'} ${one.description} ${failed ? 'failed' : 'done'} (${elapsed(one)} · ${one.tools} tools)`)
       void helpersNews($)
     }
     return r
@@ -681,6 +744,10 @@ export const register: Register = on => {
     lingering = []
     // The conversation is gone; the whole history goes with it.
     await update($, nodes, () => [])
+    await update($, treeScroll, () => ({ follow: true, off: 0 }))
+    await update($, agents, list => list.filter(a => a.status === 'running')) // a background agent may run on
+    await update($, agentPick, () => null)
+    await update($, gridScroll, () => ({ follow: false, off: 0 }))
     paint($, 'idle', '')
 
     return next(e)
@@ -688,6 +755,7 @@ export const register: Register = on => {
 
   on('command.run', { command: 'mission' }, async ($, e) => {
     const arg = e.args.trim().toLowerCase()
+    if (arg === 'agents') return openAgents($)
     if (arg === 'code' || arg === 'who') await update($, view, () => arg)
     let said: string | undefined
     if (arg === 'crab') {
@@ -702,7 +770,25 @@ export const register: Register = on => {
     await $.ui.open({ id: PANE, title: 'Mission Control', focus: true })
     void renderSoon($)
     const s = summary(await read($, nodes))
-    return { text: said ?? `Mission Control: ${s.agents} agents · ${s.tools} tool calls · ${(await read($, files)).length} files. w: who · c: code · q: close` }
+    return { text: said ?? `Mission Control: ${s.agents} agents · ${s.tools} tool calls · ${(await read($, files)).length} files. w: who · c: code · a: agents · q: close` }
+  })
+
+  on('command.run', { command: 'radar' }, async $ => openAgents($))
+
+  // Scrolling: each view is drawn to the pane's room exactly, so the engine's
+  // window has nothing to move; the wheel or scroll keys move the view's own
+  // window instead (the tree, the grid of cards, an agent's conversation), the
+  // tabs and the crab staying in place. The code map does not scroll.
+  on('ui.scroll', { requestId: PANE }, async ($, e) => {
+    const w = scrollable
+    if (!e.by || w === undefined) return {}
+    // The grid moves a row of cards a wheel tick; a page key's rows come to as many rows of cards.
+    const by = Math.abs(e.by) < w.unit ? e.by : Math.round(e.by / w.unit)
+    const move = (t: { follow: boolean; off: number }) => scrolled(t, by, Math.max(0, w.total - w.rows))
+    if (w.at === 'tree') await update($, treeScroll, move)
+    else if (w.at === 'grid') await update($, gridScroll, move)
+    else await update($, agentScroll, move)
+    return {}
   })
 
   on('ui.render', { component: 'Pane', requestId: PANE }, async ($, e) => {
@@ -716,114 +802,269 @@ export const register: Register = on => {
       <Box flexDirection="row" gap={1}>
         <Button key="who" label="Who" hotkey="w" variant={v === 'who' ? 'primary' : undefined} onPress={() => update($, view, () => 'who')} />
         <Button key="code" label="Code" hotkey="c" variant={v === 'code' ? 'primary' : undefined} onPress={() => void setCode($)} />
+        <Button key="agents" label="Agents" hotkey="a" variant={v === 'agents' ? 'primary' : undefined} onPress={() => void showAgents($)} />
         <Button key="close" label="Close" hotkey="q" role="dismiss" onPress={() => $.ui.close({ id: PANE })} />
       </Box>
     )
 
+    // The crab at the pane's foot, in every view: the glyph crab, the scene's
+    // prop beside it, and what it says, in three rows. Its block takes its rows
+    // from the view above it.
+    const hidden = await read($, isCrabHidden)
+    const acted = hidden ? undefined : await read($, scene)
+    const ticked = hidden ? undefined : await read($, crabTick)
+    const crab = acted === undefined || ticked === undefined ? undefined : sceneRows(acted.activity, ticked)
+    const crabRow = crab !== undefined && acted !== undefined && (
+      <Box flexDirection="row" gap={2} flexShrink={0}>
+        <Box flexDirection="column" flexShrink={0} width={CRAB_WIDTH}>
+          {crab.crab.map(row => (
+            <Text color="claude">{row}</Text>
+          ))}
+        </Box>
+        <Box flexDirection="column" flexShrink={0}>
+          {crab.prop.map(row => (
+            <Text dimColor>{row === '' ? ' ' : row}</Text>
+          ))}
+        </Box>
+        <Box flexDirection="column" flexGrow={1} minWidth={0}>
+          <Text> </Text>
+          <Text bold wrap="truncate-end">
+            {LABELS[acted.activity]}
+          </Text>
+          <Text dimColor wrap={acted.detail.length <= ONE_LINE ? 'truncate-end' : 'wrap'}>
+            {acted.detail === '' ? ' ' : acted.detail}
+          </Text>
+        </Box>
+      </Box>
+    )
+    // The rows a view's window has: what the tabs, the view's own `fixed` rows
+    // and the crab leave of the body, at least three however short the pane.
+    const windowRows = (fixed: number) => Math.max(3, rows - fixed - (crabRow ? CRAB_FOOT_ROWS : 0))
+    // A view in its frame: the tabs, the view, then the crab at the foot. With the
+    // crab the column is as tall as the body, and the spacer before the crab takes
+    // what the view leaves. A view taller than its window adds one row of scroll
+    // room: the engine raises ui.scroll only while it has rows to scroll, and the
+    // hook that answers it moves the view's own window, this content staying put.
+    const framed = (content: (RenderNode | false | null | undefined | '')[], isOverflow = false) => (
+      <Box flexDirection="column" minHeight={isOverflow ? bodyRows + 1 : crabRow ? bodyRows : undefined}>
+        {head}
+        {content}
+        {crabRow && <Box flexGrow={1} />}
+        {crabRow && <Text>{' '}</Text>}
+        {crabRow}
+        {isOverflow && <Text>{' '}</Text>}
+      </Box>
+    )
+    // Where a view's window stands, clamped to what it now holds; noted for the scroll hook.
+    const place = (at: 'tree' | 'grid' | 'agent', t: { follow: boolean; off: number }, total: number, shown: number, unit = 1) => {
+      scrollable = { at, total, rows: shown, unit }
+      return scrolled(t, 0, Math.max(0, total - shown)).off
+    }
+
     if (v === 'code') {
-      if (e.surface !== 'terminal') {
-        return (
-          <Box flexDirection="column">
-            {head}
-            <Text dimColor>The code map draws in the terminal.</Text>
-          </Box>
-        )
-      }
+      scrollable = undefined
+      if (e.surface !== 'terminal') return framed([<Text dimColor>The code map draws in the terminal.</Text>])
       const { Image } = $.ui.resolve(e)
       // A fixed 16:10 shape from the pane's width: lines coming and going above the prompt
-      // change the pane's height, and must not resize (and jolt) the picture.
-      const imageRows = Math.min(rows, Math.round(columns * 0.3))
+      // change the pane's height, and must not resize (and jolt) the picture. The crab's
+      // rows come off the room it may take.
+      const imageRows = Math.max(3, Math.min(rows - (crabRow ? CRAB_FOOT_ROWS : 0), Math.round(columns * 0.3)))
       if (draw.size.columns !== columns || draw.size.rows !== imageRows) {
         draw.size = { columns, rows: imageRows }
         void renderSoon($)
       }
       const f = await read($, frame)
-      return (
-        <Box flexDirection="column">
-          {head}
-          {f ? (
-            <Image key="map" source={{ file: f.file, format: 'png', generation: f.n }} columns={draw.size.columns} rows={draw.size.rows} alt="Code map" />
-          ) : (
-            <Text dimColor>{draw.error || 'Drawing the code map…'}</Text>
-          )}
+      return framed([
+        f ? (
+          <Image key="map" source={{ file: f.file, format: 'png', generation: f.n }} columns={draw.size.columns} rows={draw.size.rows} alt="Code map" />
+        ) : (
+          <Text dimColor>{draw.error || 'Drawing the code map…'}</Text>
+        ),
+      ])
+    }
+
+    if (v === 'agents') {
+      const list = await read($, agents)
+      const pick = await read($, agentPick)
+      const one = list.find(a => a.id === pick)
+      const width = columns
+      const inView = e.props.view?.agentId // the agent whose transcript the main view shows, if any
+      const choose = (id: string | null) => async () => {
+        await update($, agentPick, () => id)
+        await update($, agentNotice, () => null)
+        await update($, agentScroll, () => ({ follow: true, off: 0 })) // each agent's messages open on their latest
+      }
+      const say = (text: string) => update($, agentNotice, () => text)
+      const toMain = inView !== undefined && (
+        <Button key="main" label="Main view" hotkey="m" onPress={async () => {
+          const r = await $.ui.view({}).catch(err => ({ deny: String(err) }))
+          if (r.deny) await say(`Could not go back: ${r.deny}`)
+        }} />
+      )
+
+      if (one) {
+        const found = await $.session.messages({ agentId: one.id })
+        const all = 'deny' in found ? [] : found
+        const messages = all.slice(-MAX_MESSAGES)
+        const note = await read($, agentNotice)
+        // The conversation as rows of one line each, cut to the pane's width, so
+        // the window knows how many it holds.
+        const lineWidth = Math.max(10, width - 1)
+        const body: RenderNode[] = []
+        if ('deny' in found) body.push(<Text dimColor>{`No conversation to show: ${found.deny}`}</Text>)
+        else if (all.length === 0) body.push(<Text dimColor>No messages yet.</Text>)
+        if (all.length > messages.length) body.push(<Text dimColor>{`… ${all.length - messages.length} earlier messages not shown`}</Text>)
+        messages.forEach((m, i) => {
+          const text = m.text.trim()
+          const uses = m.role === 'assistant' ? m.toolUses : []
+          if (!text && uses.length === 0) return // a row of tool results only
+          if (body.length > 0) body.push(<Text> </Text>)
+          if (text) {
+            const who = m.role === 'assistant' ? 'agent: ' : i === 0 && all.length === messages.length ? 'task: ' : 'user: '
+            wrapCells(who + text, lineWidth).forEach((line, k) =>
+              body.push(
+                k === 0 && line.startsWith(who) ? (
+                  <Text wrap="truncate-end">
+                    <Text color={m.role === 'assistant' ? 'cyan' : 'magenta'} bold>{who}</Text>
+                    <Text>{line.slice(who.length)}</Text>
+                  </Text>
+                ) : (
+                  <Text wrap="truncate-end">{line === '' ? ' ' : line}</Text>
+                ),
+              ),
+            )
+          }
+          for (const u of uses) body.push(<Text dimColor wrap="truncate-end">{`  → ${doingOf({ ...u.input, tool: u.tool })}${u.isError ? ' (error)' : ''}`}</Text>)
+        })
+        // The window over it: at the bottom it follows new messages; scrolled up it holds its place.
+        const shown = windowRows(note ? 5 : 4) // the title, what it is doing, the buttons, a notice, the rule
+        const off = place('agent', await read($, agentScroll), body.length, shown)
+        const above = off
+        const below = Math.max(0, body.length - off - shown)
+        return framed(
+          [
+            <Text wrap="truncate-end">
+              <Text color={agentColor(one)} bold>{`${agentIcon(one)} ${one.description}`}</Text>
+              <Text dimColor>{`  ${one.type} · ${elapsed(one)} · ${one.tools} tools`}</Text>
+            </Text>,
+            <Text dimColor wrap="truncate-end">{`now: ${one.last}`}</Text>,
+            <Box flexDirection="row" gap={1}>
+              <Button key="back" label="Back" hotkey="b" variant="primary" onPress={choose(null)} />
+              <Button key="view" label="Open transcript" hotkey="o" onPress={async () => {
+                const r = await $.ui.view({ agentId: one.id }).catch(err => ({ deny: String(err) }))
+                await say(r.deny ? `Could not open it: ${r.deny}` : 'Its transcript is in the main view: your next prompt goes to it. m goes back.')
+              }} />
+              {one.status === 'running' && (
+                <Button key="stop" label="Ask to stop" hotkey="s" onPress={async () => {
+                  const r = await $.session.send({ to: { agentId: one.id }, text: STOP_TEXT }).catch(err => ({ isDelivered: false as const, reason: String(err) }))
+                  await say(r.isDelivered ? 'Asked it to stop. It stops once it reads the message.' : `Not sent: ${r.reason}`)
+                }} />
+              )}
+              {below > 0 && <Button key="end" label="Latest" hotkey="e" onPress={() => update($, agentScroll, () => ({ follow: true, off: 0 }))} />}
+              {toMain}
+            </Box>,
+            note && <Text color="yellow" wrap="truncate-end">{note}</Text>,
+            <Text dimColor>{`${'─'.repeat(Math.max(10, width - 14))}${above > 0 ? ` ↑${above}` : ''}${below > 0 ? ` ↓${below}` : ''}`}</Text>,
+            ...body.slice(off, off + shown),
+          ],
+          body.length > shown,
+        )
+      }
+
+      // The grid: a card per agent, as many a row as fit (up to three), along the
+      // timeline: the first spawned at the head, the newest at the far end. Its
+      // window moves a row of cards at a time and, at the bottom, follows new ones.
+      const running = list.filter(a => a.status === 'running').length
+      const cols = Math.max(1, Math.min(3, Math.floor(width / CARD_MIN)))
+      const cardWidth = Math.floor((width - (cols - 1)) / cols) // one cell of gap between cards
+      const cardRows = chunk(list, cols)
+      const shown = Math.max(1, Math.floor(windowRows(2) / CARD_ROWS)) // the heading and the buttons stay
+      const off = place('grid', await read($, gridScroll), cardRows.length, shown, CARD_ROWS)
+      const below = Math.max(0, cardRows.length - off - shown)
+      const card = (a: AgentCard, i: number) => (
+        <Box flexDirection="column" width={cardWidth} borderStyle="round" borderColor={a.id === inView ? 'cyan' : 'inactive'} paddingX={1}>
+          <Button key={`agent-${a.id}`} plain hotkey={i < 9 ? String(i + 1) : i === 9 ? '0' : undefined} dimColor={a.status !== 'running'} label={`${agentIcon(a)} ${a.description}`} onPress={choose(a.id)} />
+          <Text dimColor wrap="truncate-end">{`${a.type} · ${elapsed(a)} · ${a.tools} tools`}</Text>
+          <Text color={agentColor(a)} wrap="truncate-end">{a.status === 'done' ? 'finished' : a.last}</Text>
+          <Text dimColor wrap="truncate-end">{a.said ? `“${a.said}”` : ' '}</Text>
         </Box>
+      )
+      return framed(
+        [
+          <Text bold>{`${running} running · ${list.length - running} finished${off > 0 ? ` · ↑${off * cols}` : ''}${below > 0 ? ` · ↓${Math.max(0, list.length - (off + shown) * cols)}` : ''}`}</Text>,
+          <Box flexDirection="row" gap={1}>
+            <Button key="clear" label="Clear finished" hotkey="x" onPress={() => update($, agents, all => all.filter(x => x.status === 'running'))} />
+            {toMain}
+          </Box>,
+          list.length === 0 && <Text dimColor>No subagents yet this session.</Text>,
+          // The digits count the cards in the window.
+          ...cardRows.slice(off, off + shown).map((row, r) => (
+            <Box flexDirection="row" gap={1}>
+              {row.map((a, c) => card(a, r * cols + c))}
+            </Box>
+          )),
+        ],
+        cardRows.length > shown,
       )
     }
 
-    const at = Date.now()
-    const ls = lines(await read($, nodes), at)
+    const ls = lines(await read($, nodes), Date.now())
     const s = summary(await read($, nodes))
-    const hidden = await read($, isCrabHidden)
-    // The crab at the pane's foot: the glyph crab, the scene's prop beside it,
-    // and what it says, in three rows. Its block takes its rows from the tree.
-    const acted = hidden ? undefined : await read($, scene)
-    const ticked = hidden ? undefined : await read($, crabTick)
-    const crab = acted === undefined || ticked === undefined ? undefined : sceneRows(acted.activity, ticked)
-    // The tree keeps at least three rows however short the pane; past that
-    // the crab's block gives way to the engine's scroll window.
-    const shown = ls.slice(hidden ? -rows + 1 : -Math.max(3, rows - 1 - CRAB_FOOT_ROWS))
-    // With the crab the column is as tall as the body, and the spacer before the
-    // crab takes what the tree leaves, so the crab sits at the pane's foot.
-    return (
-      <Box flexDirection="column" minHeight={crab !== undefined ? bodyRows : undefined}>
-        {head}
-        <Text dimColor>{`${s.agents} agents (${s.running} running) · ${s.tools} tool calls${s.failed ? ` · ${s.failed} failed` : ''}`}</Text>
-        {ls.length === 0 && <Text dimColor>Nothing yet. Start a task and watch it fill in.</Text>}
-        {shown.map(l => (
+    // The tree's window. Scrolled up it holds its place while new lines arrive;
+    // at the bottom it follows them.
+    const shown = windowRows(1) // the summary line stays
+    const off = place('tree', await read($, treeScroll), ls.length, shown)
+    return framed(
+      [
+        <Text dimColor>{`${s.agents} agents (${s.running} running) · ${s.tools} tool calls${s.failed ? ` · ${s.failed} failed` : ''}${off > 0 ? ` · ↑${off}` : ''}`}</Text>,
+        ls.length === 0 && <Text dimColor>Nothing yet. Start a task and watch it fill in.</Text>,
+        ...ls.slice(off, off + shown).map(l => (
           <Text wrap="truncate-end">
             <Text dimColor>{l.prefix}</Text>
             <Text color={l.status === 'running' ? 'yellow' : l.status === 'failed' ? 'red' : l.node.kind === 'tool' ? undefined : 'green'} bold={l.node.kind !== 'tool'} dimColor={l.status === 'done' && l.node.kind === 'tool'}>
               {l.text}
             </Text>
           </Text>
-        ))}
-        {crab !== undefined && acted !== undefined && <Box flexGrow={1} />}
-        {crab !== undefined && acted !== undefined && <Text>{' '}</Text>}
-        {crab !== undefined && acted !== undefined && (
-          <Box flexDirection="row" gap={2} flexShrink={0}>
-            <Box flexDirection="column" flexShrink={0} width={CRAB_WIDTH}>
-              {crab.crab.map(row => (
-                <Text color="claude">{row}</Text>
-              ))}
-            </Box>
-            <Box flexDirection="column" flexShrink={0}>
-              {crab.prop.map(row => (
-                <Text dimColor>{row === '' ? ' ' : row}</Text>
-              ))}
-            </Box>
-            <Box flexDirection="column" flexGrow={1} minWidth={0}>
-              <Text> </Text>
-              <Text bold wrap="truncate-end">
-                {LABELS[acted.activity]}
-              </Text>
-              <Text dimColor wrap={acted.detail.length <= ONE_LINE ? 'truncate-end' : 'wrap'}>
-                {acted.detail === '' ? ' ' : acted.detail}
-              </Text>
-            </Box>
-          </Box>
-        )}
-      </Box>
+        )),
+      ],
+      ls.length > shown,
     )
   })
 
-  // The band: one summary line while Claude works, and for a short while after.
+  // The band: one summary line while Claude works, and for a short while after;
+  // under it one live line per running subagent, and a ✓ for 30 s once one finishes.
   on('ui.render', { component: 'AbovePrompt' }, async ($, e, next) => {
     const rest = await next(e) // what other mods and Claude Code draw here stays
+    await read($, now) // subscribes the band to the clock
     const list = await read($, nodes)
     const main = list.filter(n => n.kind === 'main').at(-1)
     const s = summary(list)
-    const isRecent = main !== undefined && (main.status === 'running' || Date.now() - (main.end ?? 0) < BAND_AFTER_MS)
-    if (e.props.hasSurvey || !isRecent || s.tools + s.agents === 0) return rest
+    const isRecent = main !== undefined && (main.status === 'running' || Date.now() - (main.end ?? 0) < BAND_AFTER_MS) && s.tools + s.agents > 0
+    const working = (await read($, agents)).filter(a => isShown(a))
+    if (e.props.hasSurvey || (!isRecent && working.length === 0)) return rest
     const t = await read($, turn)
     const edited = (await read($, files)).filter(f => f.changedTurn === t).length
-    const { Text } = $.ui.resolve(e)
+    const { Box, Text } = $.ui.resolve(e)
     const mine = (
-      <Text wrap="truncate-end">
-        <Text color="blue" bold>{' ◈ mission: '}</Text>
-        <Text>{`${s.agents ? `${s.running}/${s.agents} agents · ` : ''}${s.tools} tools${s.failed ? ` · ${s.failed} failed` : ''}${edited ? ` · ${edited} files changed` : ''}`}</Text>
-        <Text dimColor>{`  ·  ${LABELS[(await read($, scene)).activity]}`}</Text>
-        <Text dimColor>{'  ·  /mission'}</Text>
-      </Text>
+      <Box flexDirection="column">
+        {isRecent && (
+          <Text wrap="truncate-end">
+            <Text color="blue" bold>{' ◈ mission: '}</Text>
+            <Text>{`${s.agents ? `${s.running}/${s.agents} agents · ` : ''}${s.tools} tools${s.failed ? ` · ${s.failed} failed` : ''}${edited ? ` · ${edited} files changed` : ''}`}</Text>
+            <Text dimColor>{`  ·  ${LABELS[(await read($, scene)).activity]}`}</Text>
+            <Text dimColor>{'  ·  /mission'}</Text>
+          </Text>
+        )}
+        {working.slice(-BAND_AGENTS).map(a => ( // the timeline's end: the latest at work, not its oldest
+          <Text wrap="truncate-end">
+            <Text color={agentColor(a)} bold>{` ${agentIcon(a)} ${a.description}`}</Text>
+            <Text dimColor>{`  ${elapsed(a)} · ${a.tools} tools`}</Text>
+            {a.status === 'running' && <Text>{` · ${a.last}`}</Text>}
+            {a.status === 'failed' && <Text color="red">{` · ${a.last}`}</Text>}
+          </Text>
+        ))}
+        {working.length > BAND_AGENTS && <Text dimColor>{`   +${working.length - BAND_AGENTS} more · /radar`}</Text>}
+      </Box>
     )
     return stackBands(rest, 'mission-control', mine, 'above', await (bandOrder ??= readBandOrder($).catch(() => []))) // above what other mods draw, unless the band order says otherwise
   })
@@ -843,6 +1084,40 @@ export function resetBandOrder() {
 async function setCode($: EngineInterface) {
   await update($, view, () => 'code')
   await renderSoon($)
+}
+
+// The agents view, on its grid; the agents that started before this mod loaded join it.
+async function showAgents($: EngineInterface) {
+  await adopt($).catch(() => {})
+  await update($, view, () => 'agents')
+  await update($, agentPick, () => null)
+  await update($, agentNotice, () => null)
+}
+
+// /radar and /mission agents: the pane open on the agents view.
+async function openAgents($: EngineInterface) {
+  await showAgents($)
+  await $.ui.open({ id: PANE, title: 'Mission Control', focus: true })
+  const list = await read($, agents)
+  const running = list.filter(a => a.status === 'running').length
+  return { text: `${running} running, ${list.length - running} finished` }
+}
+
+// Agents that started before this mod loaded: take them from the engine's own list.
+async function adopt($: EngineInterface) {
+  const known = new Set((await read($, agents)).map(a => a.id))
+  const fresh = (await $.agent.list())
+    .filter(a => !known.has(a.id))
+    .map((a): AgentCard => ({
+      id: a.id,
+      description: a.description,
+      type: a.type,
+      status: a.status === 'running' ? 'running' : a.status === 'completed' ? 'done' : 'failed',
+      startedAt: Date.now(),
+      tools: 0,
+      last: a.status === 'running' ? 'running (started before the view)' : a.status,
+    }))
+  if (fresh.length > 0) await update($, agents, list => [...list, ...fresh].slice(-MAX_AGENTS))
 }
 
 // Notes a file Claude touched, with the relative imports it has.
@@ -910,8 +1185,15 @@ async function renderSoon($: EngineInterface) {
 }
 
 async function renderMap($: EngineInterface) {
-  if (!(await $.fs.exists(CHROME))) {
-    draw.error = `The code map needs Google Chrome at ${CHROME}.`
+  let bin: string | undefined
+  for (const p of [await $.env.get('CHROME_PATH'), ...CHROMES]) {
+    if (p && (await $.fs.exists(p))) {
+      bin = p
+      break
+    }
+  }
+  if (!bin) {
+    draw.error = 'The code map needs Google Chrome or Chromium. Set CHROME_PATH to point at one.'
     await update($, now, () => Date.now()) // redraw the pane with the message
     return
   }
@@ -930,6 +1212,6 @@ async function renderMap($: EngineInterface) {
     'mkdir -p "$(dirname "$2")"; rm -f "$2"; "$1" --headless=new --disable-gpu --hide-scroll-bars --force-device-scale-factor=2 --no-first-run --no-default-browser-check ' +
     '--user-data-dir="$3" --window-size="$4" --screenshot="$2" "$5" >/dev/null 2>&1 & pid=$!; ' +
     'i=0; while [ ! -s "$2" ] && [ $i -lt 150 ]; do sleep 0.1; i=$((i+1)); done; sleep 0.2; pkill -P $pid 2>/dev/null; kill $pid 2>/dev/null; [ -s "$2" ]'
-  const r = await $.process.run(['sh', '-c', script, 'mission-control', CHROME, png, `${dir}/chrome`, `${width},${height}`, `file://${encodeURI(svgPath)}`], { timeoutMs: 20_000 })
+  const r = await $.process.run(['sh', '-c', script, 'mission-control', bin, png, `${dir}/chrome`, `${width},${height}`, `file://${encodeURI(svgPath)}`], { timeoutMs: 20_000 })
   if (r.exitCode === 0) await update($, frame, () => ({ file: png, n }))
 }

@@ -1,7 +1,7 @@
 {
   "name": "mission-control",
-  "version": "0.2.1",
-  "description": "/mission opens a live map of the main agent, its subagents and every tool call, plus a code map of the files they touch; a crab at the pane's foot acts out what Claude is doing.",
+  "version": "0.3.0",
+  "description": "/mission opens a live map of the main agent, its subagents and every tool call, a code map of the files they touch, and a card per subagent that opens to its whole conversation, with buttons to show its transcript in the main view or ask it to stop (/radar opens that tab). Each view scrolls; a crab at the pane's foot acts out what Claude is doing. The band above the prompt sums up the turn and has one live line per running subagent.",
   "author": {
     "name": "Hamza Zafar",
     "url": "https://github.com/hamzafer"

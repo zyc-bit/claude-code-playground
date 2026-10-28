@@ -78,3 +78,12 @@ export function summary(nodes: MissionNode[]) {
   const failed = nodes.filter(n => n.kind === 'tool' && n.status === 'failed').length
   return { agents: agents.length, running, tools, failed }
 }
+
+// The tree window's place after a scroll of `by` rows (the wheel's sign,
+// negative toward the top): `off` rows hidden above it, clamped to `maxOff`,
+// and `follow` back once it reaches the newest rows, so lines that arrive
+// later move it again. A `by` of 0 only clamps, as the pane's redraw does.
+export function scrolled(t: { follow: boolean; off: number }, by: number, maxOff: number): { follow: boolean; off: number } {
+  const off = Math.max(0, Math.min(maxOff, (t.follow ? maxOff : t.off) + by))
+  return { follow: off >= maxOff, off }
+}

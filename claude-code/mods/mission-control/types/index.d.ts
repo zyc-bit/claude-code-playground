@@ -54,18 +54,37 @@ export type MapFile = {
 
 export type MissionFrame = { file: string; n: number } | null
 
+// One card in the "agents" view: a subagent of the session, kept after it ends.
+export type AgentCard = {
+  id: string
+  description: string
+  type: string
+  status: 'running' | 'done' | 'failed'
+  startedAt: number
+  endedAt?: number
+  tools: number
+  last: string
+  said?: string // the latest text its model answered, on one line
+}
+
 declare module 'claude-code' {
   interface PluginState {
     'mission-control': {
       nodes: MissionNode[]
       files: MapFile[]
-      view: 'who' | 'code'
+      view: 'who' | 'code' | 'agents'
       frame: MissionFrame
       turn: number
       now: number
       scene: Scene // what the crab is acting out
       crabTick: number // the animation tick the crab's prop is on
       isCrabHidden: boolean
+      'tree-scroll': { follow: boolean; off: number } // the who view's window: rows above it, or following the newest
+      agents: AgentCard[] // the agents view's cards, the oldest first, the last thirty
+      agentPick: string | null // the agent whose page is open, or null for the grid
+      agentNotice: string | null // what the last button press on an agent's page came to
+      'grid-scroll': { follow: boolean; off: number } // the agents grid's window, in rows of cards
+      'agent-scroll': { follow: boolean; off: number } // the open agent's conversation's window, in lines
     }
   }
 }

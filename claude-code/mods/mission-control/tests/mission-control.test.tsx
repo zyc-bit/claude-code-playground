@@ -2,7 +2,7 @@ import { describe, expect, mock, test } from 'claude-code/testing'
 
 import { CRAB_WIDTH, DEMO, crabRows } from '../hooks/crab'
 import { edges, fit, importsOf, layout, svg, titleOf, wrap } from '../hooks/map'
-import { label, lines, summary } from '../hooks/tree'
+import { label, lines, scrolled, summary } from '../hooks/tree'
 import { resetBandOrder } from '../hooks/register'
 
 let mockClock: any
@@ -10,7 +10,7 @@ const PANE = { component: 'Pane', requestId: 'mission-control', props: { title: 
 const BAND = { component: 'AbovePrompt', props: { hasSurvey: false, isWorking: true, maxRows: 10, bodyColumns: 120 } }
 
 // Stands for the engine beneath the mod.
-function engine(on: any, opts: { noChrome?: boolean; bands?: string; beneath?: unknown } = {}) {
+function engine(on: any, opts: { noChrome?: boolean; chromePath?: string; bands?: string; beneath?: unknown } = {}) {
   const runs: string[][] = []
   resetBandOrder()
   const writes: Record<string, string> = {}
@@ -25,7 +25,8 @@ function engine(on: any, opts: { noChrome?: boolean; bands?: string; beneath?: u
   on('fs.read', (_$: any, e: any) => ({ value: e.path.endsWith('login.tsx') ? "import { start } from '../auth/session'\n" : e.path.endsWith('/bands.json') ? opts.bands : '' }))
   on('fs.write', (_$: any, e: any) => ((writes[e.path] = e.text), { value: undefined }))
   on('fs.exists', (_$: any, e: any) => ({ value: e.path.endsWith('/bands.json') ? opts.bands !== undefined : !opts.noChrome }))
-  on('env.get', () => ({ value: '/tmp/' }))
+  const env: Record<string, string | undefined> = { TMPDIR: '/tmp/', CLAUDE_CONFIG_DIR: '/tmp/', HOME: '/tmp/', CHROME_PATH: opts.chromePath }
+  on('env.get', (_$: any, e: any) => ({ value: env[e.name] }))
   on('process.run', (_$: any, e: any) => (runs.push(e.argv), { value: { exitCode: 0, stdout: '', stderr: '' } }))
   on('ui.open', () => ({ value: { isPlaced: true } }))
   on('ui.panes', () => ({ value: [{ id: 'mission-control', title: 'Mission Control', isShown: true, isFocused: true, isPlaced: true }] }))
@@ -58,6 +59,42 @@ describe('mission-control', () => {
     await mockClock.advance(800)
     expect(await pane.find({ type: 'Text', text: /needs Google Chrome/ })).toBeDefined()
     expect(runs.some(a => a[0] === 'sh')).toBe(false)
+    await pane.unmount()
+  })
+
+  test('CHROME_PATH draws with a Chrome of one\'s own', async ($, on) => {
+    const { runs } = engine(on, { chromePath: '/opt/chrome-for-maps' })
+    await $.session.start({ surface: 'terminal', isInteractive: true, cwd: '/repo' } as any)
+    await $.command.run({ command: 'mission', args: 'code' } as any)
+    const pane = await $.ui.mount({ plugin: 'mission-control', surface: 'terminal', ...PANE } as any)
+    await mockClock.advance(800)
+    expect(runs.some(a => a[4] === '/opt/chrome-for-maps')).toBe(true) // the map draws, with that binary
+    await pane.unmount()
+  })
+
+  test('the tree window follows, sticks and follows again', () => {
+    expect(scrolled({ follow: true, off: 0 }, 0, 10)).toEqual({ follow: true, off: 10 }) // at the bottom, it stays on the newest rows
+    const up = scrolled({ follow: true, off: 0 }, -3, 10)
+    expect(up).toEqual({ follow: false, off: 7 }) // a wheel up leaves the bottom
+    expect(scrolled(up, 0, 12)).toEqual({ follow: false, off: 7 }) // lines that arrive move it not
+    expect(scrolled(up, 2, 10)).toEqual({ follow: false, off: 9 }) // a wheel down, short of the bottom
+    expect(scrolled({ follow: false, off: 9 }, 1, 10)).toEqual({ follow: true, off: 10 }) // back at the bottom, it follows again
+    expect(scrolled({ follow: true, off: 0 }, -4, 0)).toEqual({ follow: true, off: 0 }) // a tree that fits never leaves the bottom
+  })
+
+  test('the who view keeps its window on the newest rows, saying what is above', async ($, on) => {
+    engine(on)
+    await $.session.start({ surface: 'terminal', isInteractive: true, cwd: '/repo' } as any)
+    await $.turn.start({ text: 'go', turnId: 't1' } as any)
+    // Read and Bash alternate: a run of file tools would fold into one line.
+    for (let i = 0; i < 30; i++)
+      await $.tool.call((i % 2 ? { tool: 'Bash', command: `c${String(i).padStart(2, '0')}` } : { tool: 'Read', file_path: `/repo/src/f${String(i).padStart(2, '0')}.tsx` }) as any)
+    const pane = await $.ui.mount({ plugin: 'mission-control', surface: 'terminal', ...PANE } as any)
+    await pane.drawn()
+    expect(await pane.find({ type: 'Text', text: /read: src\/f14/ })).toBeDefined() // the newest Read shows
+    expect(await pane.find({ type: 'Text', text: /read: src\/f00/ })).toBeUndefined() // the oldest does not
+    expect(await pane.find({ key: 'who' })).toBeDefined() // the tabs stay
+    expect(await pane.find({ type: 'Text', text: /↑9/ })).toBeDefined() // and the window says what is above it
     await pane.unmount()
   })
 
@@ -280,6 +317,22 @@ describe('mission-control', () => {
     await $.command.run({ command: 'mission', args: 'crab' } as any)
     const bare: any = await pane.drawn()
     expect(bare.props.minHeight).toBeUndefined()
+    await pane.unmount()
+  })
+
+  test('an overflowing tree keeps the crab at the window\'s foot', async ($, on) => {
+    engine(on)
+    await $.session.start({ surface: 'terminal', isInteractive: true, cwd: '/repo' } as any)
+    await $.turn.start({ text: 'go', turnId: 't1' } as any)
+    // Read and Bash alternate: a run of file tools would fold into one line.
+    for (let i = 0; i < 30; i++)
+      await $.tool.call((i % 2 ? { tool: 'Bash', command: `c${String(i).padStart(2, '0')}` } : { tool: 'Read', file_path: `/repo/src/f${String(i).padStart(2, '0')}.tsx` }) as any)
+    const pane = await $.ui.mount({ plugin: 'mission-control', surface: 'terminal', ...PANE } as any)
+    const root: any = await pane.drawn()
+    expect(root.props.minHeight).toBe(31) // a row of scroll room more than the body
+    const kids = (root.children as any[]).filter(c => c !== false && c != null)
+    const spacer = kids.findIndex(c => c.props?.flexGrow === 1)
+    expect(kids.slice(spacer + 1).map((c: any) => c.type)).toEqual(['Text', 'Box', 'Text']) // the blank, the crab's row, then the row given away to the scroll room
     await pane.unmount()
   })
 
