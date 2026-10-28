@@ -11,6 +11,7 @@ const SWEEP = [{ role: 'user', text: 'Run the sweep', toolUses: [] }, { role: 'a
 // Stands for the engine beneath the mod. Spawns answer the `ids` in turn; `messages` answers each agent's conversation.
 function engine(on: any, ids = ['a1'], messages: (agentId: string) => unknown[] = () => SWEEP) {
   const toasts: string[] = []
+  const opens: any[] = [] // each pane opened, as asked
   let spawned = 0
   resetBandOrder()
   on('env.get', () => ({ value: undefined }))
@@ -24,12 +25,12 @@ function engine(on: any, ids = ['a1'], messages: (agentId: string) => unknown[] 
   on('turn.start', (_$: any, e: any) => ({ turnId: e.turnId }))
   on('turn.complete', () => ({ text: '' }))
   on('tool.call', () => ({ result: {}, text: 'ok' }))
-  on('ui.open', () => ({ value: { isPlaced: true } }))
-  on('ui.panes', () => ({ value: [{ id: 'mission-control', title: 'Mission Control', isShown: true, isFocused: true, isPlaced: true }] }))
+  on('ui.open', (_$: any, e: any) => (opens.push(e), { value: { isPlaced: true } }))
+  on('ui.panes', () => ({ value: opens.length ? [{ id: 'mission-control', title: 'Mission Control', isShown: true, isFocused: true, isPlaced: true }] : [] }))
   on('ui.toast', (_$: any, e: any) => (toasts.push(e.text), { value: undefined }))
   on('ui.render', ($: any, e: any) => $.ui.resolve(e).Text({ children: 'band below' }))
   on('session.messages', (_$: any, e: any) => ({ value: messages(e.agentId) }))
-  return { toasts, clock }
+  return { toasts, clock, opens }
 }
 
 // The grid's rows: Boxes in a row whose children are all bordered cards.
@@ -43,6 +44,25 @@ function wheel($: any, by: number) {
 }
 
 describe('mission-control agents view', () => {
+  test('the pane opens with an interactive session, the prompt keeping its focus', async ($, on) => {
+    const { opens } = engine(on)
+    await $.session.start({ surface: 'terminal', isInteractive: true, cwd: '/work' } as any)
+    expect(opens.map(o => [o.id, o.focus])).toEqual([['mission-control', undefined]])
+    await $.session.start({ surface: 'terminal', isInteractive: true, cwd: '/work' } as any) // a reload: the open pane stays as it is
+    expect(opens).toHaveLength(1)
+  })
+
+  test('the option off opens nothing', { options: { openOnStart: false } }, async ($, on) => {
+    const { opens } = engine(on)
+    await $.session.start({ surface: 'terminal', isInteractive: true, cwd: '/work' } as any)
+    expect(opens).toEqual([])
+  })
+
+  test('a session with no person opens nothing', async ($, on) => {
+    const { opens } = engine(on)
+    await $.session.start({ surface: null, isInteractive: false, cwd: '/work' } as any)
+    expect(opens).toEqual([])
+  })
   test('helpers', () => {
     expect(elapsed({ startedAt: 0, endedAt: 252_000 })).toBe('4m 12s')
     expect(elapsed({ startedAt: 0, endedAt: 9_000 })).toBe('9s')
@@ -278,6 +298,36 @@ describe('mission-control agents view', () => {
       await ui.press({ key: tab })
       expect([tab, await ui.find({ type: 'Text', text: /▐/ })]).toEqual([tab, undefined])
     }
+    await ui.unmount()
+  })
+})
+
+describe('mission-control across a restart', () => {
+  test('--continue finds the who tree and the cards as the session left them; /clear does not', async ($, on) => {
+    engine(on)
+    mock.store(on)
+    on('session.id', () => ({ value: 'sess-1' }))
+    on('session.end', (_$: any, e: any) => ({ sessionId: e.sessionId }))
+    await $.session.start({ surface: 'terminal', isInteractive: true, cwd: '/work' } as any)
+    await $.turn.start({ text: 'fix the login bug', turnId: 't1' } as any)
+    await $.agent.spawn({ prompt: 'run it', description: 'sweep runner' } as any) // still running when the session ends
+    await $.tool.call({ tool: 'Read', file_path: '/work/src/a.ts', tool_use_id: 'u1' } as any)
+    await $.turn.complete({ reason: 'answer', answer: 'ok', durationMs: 1, turnId: 't1' } as any)
+    await $.session.end({ reason: 'prompt_input_exit', sessionId: 'sess-1', resume: { id: 'sess-1' } } as any)
+
+    // the next process: --continue starts the same session again
+    await $.session.start({ surface: 'terminal', isInteractive: true, cwd: '/work' } as any)
+    await $.command.run({ command: 'mission', args: 'who' } as any)
+    const ui = await $.ui.mount({ plugin: 'mission-control', surface: 'terminal', ...PANE } as any)
+    expect(await ui.find({ type: 'Text', text: /1 agents \(0 running\) · 1 tool calls/ })).toBeDefined() // what ran then reads ended
+    expect(await ui.find({ type: 'Text', text: /◆ main · fix the login bug/ })).toBeDefined()
+    await ui.press({ key: 'agents' })
+    expect(await ui.find({ key: 'agent-a1' })).toBeDefined()
+    expect(await ui.find({ type: 'Text', text: /0 running · 1 finished/ })).toBeDefined()
+
+    // /clear ends the conversation: nothing is saved for it, and what was saved stays with its session
+    await $.session.end({ reason: 'clear', sessionId: 'sess-1', resume: { id: 'sess-1' } } as any)
+    expect(await ui.find({ type: 'Text', text: /No subagents yet|0 running · 0 finished/ })).toBeDefined()
     await ui.unmount()
   })
 })

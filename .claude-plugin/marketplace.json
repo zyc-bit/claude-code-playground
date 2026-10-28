@@ -60,7 +60,7 @@
     {
       "name": "mission-control",
       "source": "./claude-code/mods/mission-control",
-      "description": "/mission opens a live map of the main agent, its subagents and every tool call, a code map of the files they touch, and a card per subagent that opens to its whole conversation, with buttons to show its transcript in the main view or ask it to stop (/radar opens that tab). Each view scrolls; a crab at the pane's foot acts out what Claude is doing. The band above the prompt sums up the turn and has one live line per running subagent."
+      "description": "/mission opens a live map of the main agent, its subagents and every tool call, a code map of the files they touch, and a card per subagent that opens to its whole conversation, with buttons to show its transcript in the main view or ask it to stop (/radar opens that tab). It opens with each session (the openOnStart option turns that off), and each view scrolls; a crab at the pane's foot acts out what Claude is doing. The band above the prompt sums up the turn and has one live line per running subagent."
     },
     {
       "name": "next-steps",

@@ -1,10 +1,18 @@
 {
   "name": "mission-control",
-  "version": "0.3.0",
-  "description": "/mission opens a live map of the main agent, its subagents and every tool call, a code map of the files they touch, and a card per subagent that opens to its whole conversation, with buttons to show its transcript in the main view or ask it to stop (/radar opens that tab). Each view scrolls; a crab at the pane's foot acts out what Claude is doing. The band above the prompt sums up the turn and has one live line per running subagent.",
+  "version": "0.3.2",
+  "description": "/mission opens a live map of the main agent, its subagents and every tool call, a code map of the files they touch, and a card per subagent that opens to its whole conversation, with buttons to show its transcript in the main view or ask it to stop (/radar opens that tab). It opens with each session (the openOnStart option turns that off), and each view scrolls; a crab at the pane's foot acts out what Claude is doing. The band above the prompt sums up the turn and has one live line per running subagent.",
   "author": {
     "name": "Hamza Zafar",
     "url": "https://github.com/hamzafer"
   },
-  "types": "./types/index.d.ts"
+  "types": "./types/index.d.ts",
+  "userConfig": {
+    "openOnStart": {
+      "type": "boolean",
+      "title": "Open on start",
+      "default": true,
+      "description": "Open the Mission Control pane when an interactive session starts, without taking the prompt's focus. A terminal narrower than 144 columns places it once it is wide enough, or on /mission."
+    }
+  }
 }

@@ -74,6 +74,9 @@ const CARD_MIN = 40 // a grid column is at least this wide
 const CARD_ROWS = 6 // a row of cards: four lines inside a border
 const MAX_MESSAGES = 200 // an agent's page shows its last this many messages
 const STOP_TEXT = 'Please stop: finish the step you are on, start nothing new, and reply with what you have so far.'
+// What a session leaves in the store, so --continue or --resume picks its views up again.
+const SAVED_SESSIONS = 10 // the sessions kept, the latest saved
+const SAVED_NODES = 3000 // a session's newest nodes kept
 
 // Held by the host, so a hot reload keeps the picture.
 const nodes = atom({ plugin: 'mission-control', key: 'nodes' } as const, [] as MissionNode[])
@@ -384,9 +387,16 @@ async function tickIfShown($: EngineInterface): Promise<void> {
 
 let bandOrder: Promise<string[]> | undefined // read once per session: restart to apply
 
-export const register: Register = on => {
+export const register: Register = (on, options) => {
+  const isOpenOnStart = options.openOnStart !== false
   on('session.start', async ($, e, next) => {
     const r = await next(e)
+    // The pane opens with the session, the prompt keeping its focus; a reload
+    // runs this again, and an open pane is left as it is.
+    await restoreSaved($).catch(() => {})
+    if (isOpenOnStart && e.isInteractive && !(await $.ui.panes().catch(() => [])).some(p => p.id === PANE)) {
+      await $.ui.open({ id: PANE, title: 'Mission Control' }).catch(() => {})
+    }
     await $.command
       .register({
         name: 'mission',
@@ -684,6 +694,7 @@ export const register: Register = on => {
     if (isMain) {
       const t = await read($, turn)
       void explain($, t, new Map(changes)).catch(() => {}) // in the background, so the turn ends at once
+      void save($).catch(() => {})
       // The crab rests, unless work goes on without it.
       stopTimers()
       isWorking = false
@@ -742,7 +753,9 @@ export const register: Register = on => {
     calls.clear()
     asking = undefined
     lingering = []
-    // The conversation is gone; the whole history goes with it.
+    // Kept for --continue or --resume, unless /clear ended the conversation.
+    if (e.reason !== 'clear') await save($).catch(() => {})
+    // The conversation is gone from this process; the whole history goes with it.
     await update($, nodes, () => [])
     await update($, treeScroll, () => ({ follow: true, off: 0 }))
     await update($, agents, list => list.filter(a => a.status === 'running')) // a background agent may run on
@@ -1075,6 +1088,35 @@ async function readBandOrder($: EngineInterface): Promise<string[]> {
   const file = bandsFile(await $.env.get('CLAUDE_CONFIG_DIR'), await $.env.get('HOME'))
   return file && (await $.fs.exists(file)) ? parseOrder(await $.fs.read(file)) : []
 }
+
+// Saves this session's views in the store under its id: what --continue or
+// --resume needs to draw them again. Only the latest sessions are kept.
+async function save($: EngineInterface) {
+  const id = await $.session.id()
+  const list = await read($, nodes)
+  const cards = await read($, agents)
+  if (list.length === 0 && cards.length === 0) return
+  const saved: Saved = { id, at: Date.now(), nodes: list.slice(-SAVED_NODES), agents: cards, files: await read($, files), turn: await read($, turn) }
+  const all = ((await $.store.get('sessions')) as Saved[] | undefined) ?? []
+  await $.store.set('sessions', [...all.filter(x => x?.id !== id), saved].slice(-SAVED_SESSIONS))
+}
+
+// A session that comes back (--continue, --resume) finds its views as it left
+// them; what was running then was cut off with that process, so it reads ended.
+async function restoreSaved($: EngineInterface) {
+  if ((await read($, nodes)).length > 0) return // a hot reload: the views are still here
+  const id = await $.session.id()
+  const all = ((await $.store.get('sessions')) as Saved[] | undefined) ?? []
+  const saved = all.find(x => x?.id === id)
+  if (!saved) return
+  const ended = <T extends { status: string }>(x: T): T => (x.status === 'running' ? { ...x, status: 'done' } : x)
+  await update($, nodes, () => saved.nodes.map(n => (n.status === 'running' ? { ...ended(n), end: saved.at } : n)))
+  await update($, agents, () => saved.agents.map(a => (a.status === 'running' ? { ...ended(a), endedAt: saved.at, last: 'ended with the session' } : a)))
+  await update($, files, () => saved.files)
+  await update($, turn, () => saved.turn)
+}
+
+type Saved = { id: string; at: number; nodes: MissionNode[]; agents: AgentCard[]; files: MapFile[]; turn: number }
 
 // Forgets the cached band order, for tests.
 export function resetBandOrder() {
